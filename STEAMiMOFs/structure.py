@@ -15,7 +15,7 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, structure_path : Path, traj_path : Path, temperature=298.):
+    def __init__(self, model_path : Path, structure_path : Path, results_path : Path, temperature=298., h2o_energy : Float):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(device.type))
 
@@ -36,12 +36,12 @@ class MOFWithAds:
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
 
-        self._free_H2O_en = -.16875515E+02 # vdW-DF
+        self._free_H2O_en = h2o_energy
         self._current_potential_en = self._atoms.get_potential_energy()
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
 
-        self._traj_file = open(traj_path, 'a')
+        self._traj_file = open(results_path + 'traj.pdb', 'a')
 
     def insert_h2o(self, number=1, keep=True):
         """
