@@ -15,7 +15,7 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, structure_path : Path, temperature=298.):
+    def __init__(self, model_path : Path, structure_path : Path, traj_path : Path, temperature=298.):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(device.type))
 
@@ -40,6 +40,8 @@ class MOFWithAds:
         self._current_potential_en = self._atoms.get_potential_energy()
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
+
+        self._traj_file = open(traj_path, 'a')
 
     def insert_h2o(self, number=1, keep=True):
         """
@@ -228,3 +230,8 @@ class MOFWithAds:
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
         
+    def write_to_traj(self):
+        """
+        Saves a snapshot of the current atom positions to the trajectory file
+        """
+        ase.io.proteindatabank.write_proteindatabank(self._traj_file, self._atoms)
