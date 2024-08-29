@@ -37,7 +37,7 @@ class MOFWithAds:
         self.volume = self._atoms.get_volume() # Angstroms^3
 
         self._free_H2O_en = h2o_energy
-        self._current_potential_en = self._atoms.get_potential_energy()
+        self.current_potential_en = self._atoms.get_potential_energy()
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
 
@@ -99,13 +99,13 @@ class MOFWithAds:
         en_after = _atoms.get_potential_energy()
         # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are 1/atm
-        acc_prob = (np.exp(-(en_after - self._current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
+        acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
             * (1e-10)**3 # Angstroms to meters
             / 1.602e-19 # eV to J
             * 101325 # J/m^3 to atm
         )
         if keep:
-            self._current_potential_en = en_after
+            self.current_potential_en = en_after
             self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         else:
             del self._atoms[(-3 * number):]
@@ -130,7 +130,7 @@ class MOFWithAds:
         en_after = _atoms.get_potential_energy()
         # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are atm
-        acc_prob = (np.exp(-(en_after - self._current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
+        acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
             / (1e-10)**3 # Angstroms to meters
             * 1.602e-19 # eV to J
             / 101325 # J/m^3 to atm
@@ -139,7 +139,7 @@ class MOFWithAds:
             self._atoms += h2o_atoms
         else:
             self.nh2o -= number
-            self._current_potential_en = en_after
+            self.current_potential_en = en_after
             self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         return acc_prob
         
@@ -188,9 +188,9 @@ class MOFWithAds:
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after = self._atoms.get_potential_energy()
 
-        acc_ratio = np.exp(-(en_after - self._current_potential_en) / self.temperature / kb)
+        acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
         if np.random.rand(1) < acc_ratio: # move is accepted
-            self._current_potential_en = en_after
+            self.current_potential_en = en_after
             self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
             return True
         else: # move is rejected
@@ -220,10 +220,10 @@ class MOFWithAds:
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after = self._atoms.get_potential_energy()
 
-        acc_ratio = np.exp(-(en_after - self._current_potential_en) / self.temperature / kb)
+        acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
         if np.random.rand(1) < acc_ratio: # move is accepted
-            self._current_potential_en = en_after
-            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:
+            self.current_potential_en = en_after
+            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
             return True
         else: # move is rejected
             for atom_idx in range(3):

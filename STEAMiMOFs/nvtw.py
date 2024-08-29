@@ -110,6 +110,14 @@ def main():
     nvtw_ins_prob = args.nvtw_insert_probability / tot_probability
     nvtw_rem_prob = args.nvtw_remove_probability / tot_probability
 
+    cumu_rotate = trans_prob + rotate_prob
+    cumu_insert = cumu_rotate + nvtw_ins_prob
+
+    num_trans_accepted = 0
+    num_trans_attempted = 0
+    num_rot_accepted = 0
+    num_rot_attempted = 0
+
     # Create output file handles
     nvtw_ins_file = open(args.results_dir + 'insert_prob.txt', 'a')
     nvtw_rem_file = open(args.results_dir + 'remove_prob.txt', 'a')
@@ -117,6 +125,39 @@ def main():
     mof_ads.insert_h2o(args.num_h2o)
 
     mc_steps_per_cycle = max(20, mof_ads.nh2o)
+
+    for cycle in range(arge.num_cycles):
+        print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
+        if cycle != 0:
+            print("Translation moves accepted: {} of {} ({}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
+            print("Rotation moves accepted: {} of {} ({}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+        mof_ads.write_to_traj()
+        for step in range(mc_steps_per_cycle):
+            rn = np.random.rand(1)
+            if rn < trans_prob:
+                num_trans_attempted += 1
+                success = mof_ads.translate_h2o()
+                if success:
+                    num_trans_accepted += 1
+            elif rn < cumu_rotate:
+                num_rot_attempted += 1
+                success = mof_ads.rotate_h2o()
+                if success:
+                    num_rot_accepted += 1
+            elif rn < cumu_insert:
+                nvtw_prob = mof_ads.insert_h2o(keep=False)
+                nvtw_ins_file.write(nvtw_prob)
+            else:
+                nvtw_prob = mof_ads.remove_h2o(put_back=True)
+                nvtw_rem_file.write(nvtw_prob)
+    
+
+    print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
+    print("Translation moves accepted: {} of {} ({}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
+    print("Rotation moves accepted: {} of {} ({}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+    mof_ads.write_to_traj()
+
+    print("Simulation finished")
 
 if __name__ == "__main__":
     main()
