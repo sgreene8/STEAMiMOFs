@@ -1,4 +1,4 @@
-# STEAMiMOFs
+# STEAMiMOFs: Simulaton Tools for Energies of Adsorption of Molecules in Metal-Organic Frameworks
 This python-based package can be used to predict the adsorption properties of metal-organic frameworks or other nanoporous materials. It implements Monte Carlo simulations for calculating adsorption isoterms and enthalpies of adsorption using machine-learned interatomic potentials based on the [Allegro framework](https://www.nature.com/articles/s41467-023-36329-y).
 
 ## Installation
