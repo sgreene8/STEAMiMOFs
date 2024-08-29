@@ -5,6 +5,8 @@ import ase.io
 from ase import Atoms
 import numpy as np
 
+kb = 8.617333262e-5 # Boltzmann Constant, eV/K
+
 class MOFWithAds:
     """
     A class for representing the positions of adsorbate molecules within
@@ -32,17 +34,23 @@ class MOFWithAds:
         self.rot_max = 2 * np.pi # maximum angle for MC rotation
         self.trans_max = 1.
         self.temperature = temperature
+        self.volume = self._atoms.get_volume() # Angstroms^3
 
         self._free_H2O_en = -.16875515E+02 # vdW-DF
+        self._current_potential_en = self._atoms.get_potential_energy()
+        self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+        assert(self._H2O_forces.shape[1] == 3)
 
-    def insert_h2o(self, number=1):
+    def insert_h2o(self, number=1, keep=True):
         """
         Insert H2O molecules with random position and orientation in the simulation cell
+        Arguments:
+            number: The number of H2O molecules (not atoms) to insert
+            keep: Whether the inserted molecules should remain in the simulation cell upon return, or whether they should be deleted (as for the NVT+W method)
         Returns:
-            True if the insertion was accepted according to GCMC Metropolis criterion, False otherwise
+            The NVT+W probability divided by the fugacity for the insertion.
         """
         cell = self._atoms.get_cell()
-        en_before = self._atoms.get_potential_energy()
 
         O_frac_coords = np.random.rand(number, 3)
         O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
@@ -88,12 +96,50 @@ class MOFWithAds:
 
         en_after = _atoms.get_potential_energy()
         # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
-        acc_ratio = np.exp(-(en_after - en_before - self._free_H2O_en * number) / self.temperature) #* 
-        if np.random.rand(1) < acc_ratio: # move is accepted
-            return True
-        else: # move is rejected: remove inserted molecules
+        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are 1/atm
+        acc_prob = (np.exp(-(en_after - self._current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
+            * (1e-10)**3 # Angstroms to meters
+            / 1.602e-19 # eV to J
+            * 101325 # J/m^3 to atm
+        )
+        if keep:
+            self._current_potential_en = en_after
+            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+        else:
             del self._atoms[(-3 * number):]
-            return False
+            self.nh2o -= number
+        return acc_prob
+    
+
+    def remove_h2o(self, number=1, put_back=False):
+        """
+        Remove randomly selected molecules from the simulation cell
+        Arguments:
+            number: The number of H2O molecules (not atoms) to remove
+            put_back: If true, the deleted molecules will be returned to the simulation cell upon return (as for the NVT+W) method
+        Returns:
+            The NVT+W probability divided by the fugacity for the deletion.
+        """
+        remove_idx = np.random.choice(self.nh2o, number)
+        atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1)
+        h2o_atoms = self._atoms[atom_idx]
+        h2o_coords = h2o_atoms.get_positions()
+        del self._atoms[atom_idx]
+        en_after = _atoms.get_potential_energy()
+        # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
+        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are atm
+        acc_prob = (np.exp(-(en_after - self._current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
+            / (1e-10)**3 # Angstroms to meters
+            * 1.602e-19 # eV to J
+            / 101325 # J/m^3 to atm
+        )
+        if put_back:
+            self._atoms += h2o_atoms
+        else:
+            self.nh2o -= number
+            self._current_potential_en = en_after
+            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+        return acc_prob
         
     
     def rotate_h2o(self, index=None):
@@ -136,13 +182,14 @@ class MOFWithAds:
         hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
         assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
 
-        en_before = self._atoms.get_potential_energy()
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after = self._atoms.get_potential_energy()
 
-        acc_ratio = np.exp(-(en_after - en_before) / self.temperature)
+        acc_ratio = np.exp(-(en_after - self._current_potential_en) / self.temperature / kb)
         if np.random.rand(1) < acc_ratio: # move is accepted
+            self._current_potential_en = en_after
+            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
             return True
         else: # move is rejected
             for atom_idx in range(3):
@@ -167,13 +214,14 @@ class MOFWithAds:
         orig_h2o_pos = h2o.get_positions()
         new_h2o_pos = orig_h2o_pos + trans_vector
 
-        en_before = self._atoms.get_potential_energy()
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after = self._atoms.get_potential_energy()
 
-        acc_ratio = np.exp(-(en_after - en_before) / self.temperature)
+        acc_ratio = np.exp(-(en_after - self._current_potential_en) / self.temperature / kb)
         if np.random.rand(1) < acc_ratio: # move is accepted
+            self._current_potential_en = en_after
+            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:
             return True
         else: # move is rejected
             for atom_idx in range(3):
