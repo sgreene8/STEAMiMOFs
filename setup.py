@@ -17,5 +17,15 @@ setup(
     author_email='samuel.greene@austin.utexas.edu',
     url='https://github.com/sgreene8/STEAMiMOFs',
     license=license,
-    packages=find_packages(exclude=('tests'))
+    packages=find_packages(include=["STEAMiMOFs", "STEAMiMOFs.*"]),
+    entry_points={
+        # make the scripts available as command line scripts
+        "console_scripts": [
+            "STEAMiMOFs-nvtw = STEAMiMOFs.nvtw:main",
+        ]
+    },
+    install_requires=[
+        "argparse",
+        "mir-allegro"
+    ]
 )
