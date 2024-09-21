@@ -223,6 +223,12 @@ class MOFWithAds:
         orig_h2o_pos = h2o.get_positions()
         new_h2o_pos = orig_h2o_pos + trans_vector
 
+        # Periodic boundary conditions
+        new_scaled = atoms.cell.scaled_positions(new_h2o_pos)
+        new_scaled[new_scaled > 1.] -= 1
+        new_scaled[new_scaled < 0.] += 1
+        new_h2o_pos = atoms.cell.cartesian_positions(new_scaled)
+
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after = self._atoms.get_potential_energy()
