@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from ase.calculators.lj import LennardJones
 
 def test_H2O_insertion(tot_samples=100000):
-    h2oMOF = STEAMiMOFs.structure.MOFWithAds('../tests/10_sample_deployed.pth', '../tests/RUBTAK01_SL.cif')
+    h2oMOF = STEAMiMOFs.structure.MOFWithAds('deployed_model_50_sam.pth', 'RUBTAK01_SL.cif')
     n_MOF_atoms = h2oMOF.n_MOF_atoms
     h2oMOF.insert_h2o(tot_samples)
 
@@ -52,7 +52,7 @@ def test_H2O_insertion(tot_samples=100000):
     np.savetxt('h_insert_err.txt', h_err)
 
 def test_H2O_rotation(tot_samples=100000):
-    h2oMOF = STEAMiMOFs.structure.MOFWithAds('../tests/10_sample_deployed.pth', '../tests/RUBTAK01_SL.cif')
+    h2oMOF = STEAMiMOFs.structure.MOFWithAds('deployed_model_50_sam.pth', 'RUBTAK01_SL.cif')
     h2oMOF._atoms.calc = LennardJones(epsilon=0, sigma=1)
     n_MOF_atoms = h2oMOF.n_MOF_atoms
     h2oMOF.insert_h2o(1)
@@ -77,7 +77,7 @@ def test_H2O_rotation(tot_samples=100000):
     np.savetxt('rotate_err.txt', err)
 
 def test_H2O_translation(tot_samples=100000):
-    h2oMOF = STEAMiMOFs.structure.MOFWithAds('../tests/10_sample_deployed.pth', '../tests/RUBTAK01_SL.cif')
+    h2oMOF = STEAMiMOFs.structure.MOFWithAds('deployed_model_50_sam.pth', 'RUBTAK01_SL.cif')
     h2oMOF._atoms.calc = LennardJones(epsilon=0, sigma=1)
     n_MOF_atoms = h2oMOF.n_MOF_atoms
     h2oMOF.insert_h2o(1)

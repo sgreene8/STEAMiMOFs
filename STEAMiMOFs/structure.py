@@ -15,11 +15,11 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, structure_path : Path, results_path : Path, temperature=298., h2o_energy : Float):
+    def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path='.', temperature : float=298., h2o_energy : float=0.):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(device.type))
 
-        self._atoms = ase.io.read(structure_path)
+        self._atoms = ase.io.read(MOF_path)
         self._atoms.calc = NequIPCalculator.from_deployed_model(
             model_path = model_path,
             species_to_type_name = {
@@ -30,9 +30,16 @@ class MOFWithAds:
             }
         )
         self.n_MOF_atoms = len(self._atoms)
-        self.nh2o = 0
-        self.rot_max = 2 * np.pi # maximum angle for MC rotation
-        self.trans_max = 1.
+
+        if H2O_path is not None:
+            H2O_atoms = ase.io.read(H2O_path)
+            assert(len(H2O_atoms) % 3 == 0)
+            self.nh2o = len(H2O_atoms) // 3
+        else:
+            self.nh2o = 0
+        
+        self.rot_max = 30. / 180. * np.pi # maximum angle for MC rotation
+        self.trans_max = 0.05
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
 
@@ -41,9 +48,9 @@ class MOFWithAds:
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
 
-        self._traj_file = open(results_path + 'traj.pdb', 'a')
+        self._traj_file = open(results_path / 'traj.pdb', 'a')
 
-    def insert_h2o(self, number=1, keep=True):
+    def insert_h2o(self, number : int=1, keep=True) -> float:
         """
         Insert H2O molecules with random position and orientation in the simulation cell
         Arguments:
@@ -96,9 +103,9 @@ class MOFWithAds:
         self._atoms += h2o_atoms
         self.nh2o += number
 
-        en_after = _atoms.get_potential_energy()
+        en_after = self._atoms.get_potential_energy()
         # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
-        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are 1/atm
+        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
             * (1e-10)**3 # Angstroms to meters
             / 1.602e-19 # eV to J
@@ -113,7 +120,7 @@ class MOFWithAds:
         return acc_prob
     
 
-    def remove_h2o(self, number=1, put_back=False):
+    def remove_h2o(self, number : int=1, put_back=False) -> float:
         """
         Remove randomly selected molecules from the simulation cell
         Arguments:
@@ -123,13 +130,13 @@ class MOFWithAds:
             The NVT+W probability divided by the fugacity for the deletion.
         """
         remove_idx = np.random.choice(self.nh2o, number)
-        atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1)
+        atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1) + self.n_MOF_atoms
         h2o_atoms = self._atoms[atom_idx]
         h2o_coords = h2o_atoms.get_positions()
         del self._atoms[atom_idx]
-        en_after = _atoms.get_potential_energy()
+        en_after = self._atoms.get_potential_energy()
         # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
-        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation, so units are atm
+        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
             / (1e-10)**3 # Angstroms to meters
             * 1.602e-19 # eV to J
@@ -144,7 +151,7 @@ class MOFWithAds:
         return acc_prob
         
     
-    def rotate_h2o(self, index=None):
+    def rotate_h2o(self, index=None) -> float:
         """
         Rotate an h2o molecule in the cell about a randomly chosen axis by a randomly chosen angle.
         Arguments:
@@ -198,7 +205,7 @@ class MOFWithAds:
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
     
-    def translate_h2o(self, index=None):
+    def translate_h2o(self, index=None) -> float:
         """
         Translate an h2o molecule in the cell in a randomly chosen direction by a randomly chosen displacement.
         Arguments:
@@ -232,6 +239,6 @@ class MOFWithAds:
         
     def write_to_traj(self):
         """
-        Saves a snapshot of the current atom positions to the trajectory file
+        Saves a snapshot of the current H2O positions to the trajectory file
         """
-        ase.io.proteindatabank.write_proteindatabank(self._traj_file, self._atoms)
+        ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')

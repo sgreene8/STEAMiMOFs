@@ -16,19 +16,27 @@ def main():
     )
 
     parser.add_argument(
-        "--structure_path",
-        help="Path to the structure file for the MOF containing a certain number of H2O molecules",
+        "--MOF_structure_path",
+        help="Path to the structure file for the MOF without any H2O molecules",
         type=Path,
         default=None,
         required=True
     )
 
     parser.add_argument(
+        "--H2O_structure_path",
+        help="Path to a structure file for adsorbed H2O molecules. Useful for restarting a calculation",
+        type=Path,
+        default=None,
+        required=False
+    )
+
+    parser.add_argument(
         "--results_dir",
         help="Path to the directory in which results, including NVT+W insertion and removal probabilities, and PDB trajectory should be saved",
         type=Path,
-        default=None,
-        required=True
+        default='.',
+        required=False
     )
 
     parser.add_argument(
@@ -42,7 +50,6 @@ def main():
         "--H2O_energy",
         help="Internal energy of a free H2O molecule, usually calculated using the same DFT setup used to generate training data for the potential",
         type=float,
-        default=-.16875515E+02, # vdW-DF
         required=True
     )
 
@@ -101,7 +108,7 @@ def main():
     
     args = parser.parse_args()
 
-    mof_ads = structure.MOFWithAds(args.NNP_path, args.structure_path, args.results_dir, args.temperature, args.H2O_energy)
+    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, args.temperature, args.H2O_energy)
 
     # Normalize probabilities
     tot_probability = args.translate_probability + args.rotate_probability + args.nvtw_insert_probability + args.nvtw_remove_probability
@@ -119,18 +126,20 @@ def main():
     num_rot_attempted = 0
 
     # Create output file handles
-    nvtw_ins_file = open(args.results_dir + 'insert_prob.txt', 'a')
-    nvtw_rem_file = open(args.results_dir + 'remove_prob.txt', 'a')
+    nvtw_ins_file = open(args.results_dir / 'insert_prob.txt', 'a')
+    nvtw_rem_file = open(args.results_dir / 'remove_prob.txt', 'a')
 
-    mof_ads.insert_h2o(args.num_h2o)
+    if args.num_h2o > 0:
+        mof_ads.insert_h2o(args.num_h2o)
 
     mc_steps_per_cycle = max(20, mof_ads.nh2o)
 
-    for cycle in range(arge.num_cycles):
+    for cycle in range(args.num_cycles):
         print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
-        if cycle != 0:
-            print("Translation moves accepted: {} of {} ({}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
-            print("Rotation moves accepted: {} of {} ({}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+        if num_trans_attempted != 0:
+            print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted * 100))
+        if num_rot_attempted != 0:
+            print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted * 100))
         mof_ads.write_to_traj()
         for step in range(mc_steps_per_cycle):
             rn = np.random.rand(1)
@@ -146,15 +155,15 @@ def main():
                     num_rot_accepted += 1
             elif rn < cumu_insert:
                 nvtw_prob = mof_ads.insert_h2o(keep=False)
-                nvtw_ins_file.write(nvtw_prob)
+                nvtw_ins_file.write(str(nvtw_prob))
             else:
                 nvtw_prob = mof_ads.remove_h2o(put_back=True)
-                nvtw_rem_file.write(nvtw_prob)
+                nvtw_rem_file.write(str(nvtw_prob))
     
 
     print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
-    print("Translation moves accepted: {} of {} ({}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
-    print("Rotation moves accepted: {} of {} ({}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+    print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
+    print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
     mof_ads.write_to_traj()
 
     print("Simulation finished")
