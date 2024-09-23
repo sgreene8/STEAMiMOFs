@@ -225,8 +225,8 @@ class MOFWithAds:
 
         # Periodic boundary conditions
         new_scaled = atoms.cell.scaled_positions(new_h2o_pos)
-        new_scaled[new_scaled > 1.] -= 1
-        new_scaled[new_scaled < 0.] += 1
+        new_scaled[new_scaled[0] > 1.] -= 1
+        new_scaled[new_scaled[0] < 0.] += 1
         new_h2o_pos = atoms.cell.cartesian_positions(new_scaled)
 
         for atom_idx in range(3):
