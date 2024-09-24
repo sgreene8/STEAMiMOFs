@@ -48,7 +48,7 @@ class MOFWithAds:
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
 
-        self._traj_file = open(results_path / 'traj.pdb', 'a')
+        self._traj_file = open(results_path + '/traj.pdb', 'a')
 
     def insert_h2o(self, number : int=1, keep=True) -> float:
         """
@@ -243,8 +243,13 @@ class MOFWithAds:
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
         
-    def write_to_traj(self):
+    def write_to_traj(self, with_MOF=False):
         """
         Saves a snapshot of the current H2O positions to the trajectory file
+        Arguments:
+            with_MOF: If true, the MOF atoms will be included in the output file
         """
-        ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
+        if with_MOF:
+            ase.io.write(self._traj_file, self._atoms, format='proteindatabank')
+        else:
+            ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
