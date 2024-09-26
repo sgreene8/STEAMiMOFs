@@ -1,6 +1,7 @@
 from pathlib import Path
 import torch
 from nequip.ase import NequIPCalculator
+from ase.calculators.calculator import Calculator, all_changes
 import ase.io
 from ase import Atoms
 import numpy as np
@@ -20,15 +21,18 @@ class MOFWithAds:
         print('Using device {}'.format(device.type))
 
         self._atoms = ase.io.read(MOF_path)
-        self._atoms.calc = NequIPCalculator.from_deployed_model(
-            model_path = model_path,
-            species_to_type_name = {
-                "H" : "H",
-                "C" : "C",
-                "O" : "O",
-                "Zr" : "Zr",
-            }
-        )
+        if model_path is None:
+            self._atoms.calc = NullCalculator()
+        else:
+            self._atoms.calc = NequIPCalculator.from_deployed_model(
+                model_path = model_path,
+                species_to_type_name = {
+                    "H" : "H",
+                    "C" : "C",
+                    "O" : "O",
+                    "Zr" : "Zr",
+                }
+            )
         self.n_MOF_atoms = len(self._atoms)
 
         if H2O_path is not None:
@@ -253,3 +257,13 @@ class MOFWithAds:
             ase.io.write(self._traj_file, self._atoms, format='proteindatabank')
         else:
             ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
+
+
+class NullCalculator(Calculator):
+    """
+    ASE Calculator that returns zero energy and forces (for debugging purposes)
+    """
+    implemented_properties = ["energy", "forces"]
+
+    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
+        self.results = {'energy': 0.0, 'forces': np.zeros((len(atoms), 3))}
