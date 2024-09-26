@@ -5,7 +5,7 @@ from STEAMiMOFs import structure
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Perform a NVT+W simulation to determine the loading of a MOF at a target temperature and adsorbate pressure.")
+        description="Perform a NVT+W simulation to determine the thermodynamic properties of a MOF at a target temperature and loading.")
 
     parser.add_argument(
         "--NNP_path",
@@ -97,7 +97,7 @@ def main():
         "--num_cycles",
         help="Target number of MC cycles to run",
         type=int,
-        default=100,
+        default=100000,
         required=False
     )
     
@@ -125,22 +125,29 @@ def main():
     num_rot_accepted = 0
     num_rot_attempted = 0
 
-    # Create output file handles
-    nvtw_ins_file = open(args.results_dir / 'insert_prob.txt', 'a')
-    nvtw_rem_file = open(args.results_dir / 'remove_prob.txt', 'a')
-
     if args.num_h2o > 0:
         mof_ads.insert_h2o(args.num_h2o)
+
+    # Create output file handles
+    if nvtw_ins_prob > 0:
+        nvtw_ins_file = open(args.results_dir / 'insert_{:d}'.format(mof_ads.nh2o), 'a')
+    if nvtw_rem_prob > 0:
+        nvtw_rem_file = open(args.results_dir / 'remove_{:d}'.format(mof_ads.nh2o), 'a')
+    
+    energy_file = open(args.results_dir / 'energy_{:d}'.format(mof_ads.nh2o), 'a')
 
     mc_steps_per_cycle = max(20, mof_ads.nh2o)
 
     for cycle in range(args.num_cycles):
         print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
+        energy_file.write(str(mof_ads.current_potential_en))
+        mof_ads.write_to_traj()
+
         if num_trans_attempted != 0:
             print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted * 100))
         if num_rot_attempted != 0:
             print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted * 100))
-        mof_ads.write_to_traj()
+        
         for step in range(mc_steps_per_cycle):
             rn = np.random.rand(1)
             if rn < trans_prob:
@@ -164,6 +171,7 @@ def main():
     print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
     print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
     print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+    energy_file.write(str(mof_ads.current_potential_en))
     mof_ads.write_to_traj()
 
     print("Simulation finished")
