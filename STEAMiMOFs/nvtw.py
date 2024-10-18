@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 import sys
 from STEAMiMOFs import structure
+import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(
@@ -140,7 +141,8 @@ def main():
 
     for cycle in range(args.num_cycles):
         print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
-        energy_file.write(str(mof_ads.current_potential_en))
+        energy_file.write(str(mof_ads.current_potential_en) + '\n')
+        energy_file.flush()
         mof_ads.write_to_traj()
 
         if num_trans_attempted != 0:
@@ -171,7 +173,8 @@ def main():
     print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
     print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
     print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
-    energy_file.write(str(mof_ads.current_potential_en))
+    energy_file.write(str(mof_ads.current_potential_en) + '\n')
+    energy_file.flush()
     mof_ads.write_to_traj()
 
     print("Simulation finished")

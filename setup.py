@@ -26,6 +26,7 @@ setup(
     },
     install_requires=[
         "argparse",
-        "mir-allegro"
+        "mir-allegro",
+        "emcee"
     ]
 )

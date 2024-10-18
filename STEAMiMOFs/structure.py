@@ -42,8 +42,8 @@ class MOFWithAds:
         else:
             self.nh2o = 0
         
-        self.rot_max = 30. / 180. * np.pi # maximum angle for MC rotation
-        self.trans_max = 0.05
+        self.rot_max = 45. / 180. * np.pi # maximum angle for MC rotation; originally 30 degrees
+        self.trans_max = 0.1 # originally 0.05
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
 
@@ -52,7 +52,7 @@ class MOFWithAds:
         self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
         assert(self._H2O_forces.shape[1] == 3)
 
-        self._traj_file = open(results_path + '/traj.pdb', 'a')
+        self._traj_file = open(results_path / 'traj.pdb', 'a')
 
     def insert_h2o(self, number : int=1, keep=True) -> float:
         """
@@ -228,10 +228,15 @@ class MOFWithAds:
         new_h2o_pos = orig_h2o_pos + trans_vector
 
         # Periodic boundary conditions
-        new_scaled = atoms.cell.scaled_positions(new_h2o_pos)
-        new_scaled[new_scaled[0] > 1.] -= 1
-        new_scaled[new_scaled[0] < 0.] += 1
-        new_h2o_pos = atoms.cell.cartesian_positions(new_scaled)
+        new_scaled = self._atoms.cell.scaled_positions(new_h2o_pos)
+        new_scaled[:, new_scaled[0] > 1.] -= 1
+        new_scaled[:, new_scaled[0] < 0.] += 1
+        new_h2o_pos = self._atoms.cell.cartesian_positions(new_scaled)
+
+        oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
+        assert(np.allclose(oh_bond_dist, 0.95720))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
+        assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
 
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
@@ -257,6 +262,7 @@ class MOFWithAds:
             ase.io.write(self._traj_file, self._atoms, format='proteindatabank')
         else:
             ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
+        self._traj_file.flush()
 
 
 class NullCalculator(Calculator):
