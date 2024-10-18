@@ -23,6 +23,6 @@ STEAMiMOFs-nvtw --NNP_path deployed.pth --MOF_structure_path UiO-66.cif --num_h2
 ```
 will launch a NVT+W calculation with 10 H2O molecules in the structure in the cif file `UiO-66.cif` using the Allegro model saved in `deployed.pth`. Simply running `STEAMiMOFs-nvtw` will print a detailed description of all arguments.
 
-The script `STEAMiMOFs-enthalpy` can be used to calculate adsorption enthalpies using the output files `insert_*` and `remove_*`. See argument help for more information.
+The script `STEAMiMOFs-enthalpy` can be used to calculate adsorption enthalpies using the output files `energy_*`. See argument help for more information.
 
-The script `STEAMiMOFs-isotherm` can be used to calculate adsorption isotherms using the output files `energy_*`. See argument help for more information.
+The script `STEAMiMOFs-isotherm` can be used to calculate adsorption isotherms using the output files `insert_*` and `remove_*`. See argument help for more information.
