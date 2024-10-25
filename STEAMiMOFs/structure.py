@@ -36,7 +36,7 @@ class MOFWithAds:
         self.n_MOF_atoms = len(self._atoms)
 
         if H2O_path is not None:
-            H2O_atoms = ase.io.read(H2O_path)
+            H2O_atoms = ase.io.read(H2O_path, index=-1)
             assert(len(H2O_atoms) % 3 == 0)
             self.nh2o = len(H2O_atoms) // 3
         else:

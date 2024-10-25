@@ -26,7 +26,7 @@ def main():
 
     parser.add_argument(
         "--H2O_structure_path",
-        help="Path to a structure file for adsorbed H2O molecules. Useful for restarting a calculation",
+        help="Path to a structure file for adsorbed H2O molecules. Useful for restarting a calculation. If the file contains multiple frames, only the last frame will be read.",
         type=Path,
         default=None,
         required=False
@@ -88,7 +88,7 @@ def main():
 
     parser.add_argument(
         "--num_h2o",
-        help="The number of H2O molecules to add to the simulation cell upon launch",
+        help="The number of H2O molecules to add to the simulation cell upon launch, in addition to those in the file specified by H2O_structure_path",
         type=int,
         default=0,
         required=False
@@ -143,6 +143,8 @@ def main():
         print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
         energy_file.write(str(mof_ads.current_potential_en) + '\n')
         energy_file.flush()
+        nvtw_ins_file.flush()
+        nvtw_rem_file.flush()
         mof_ads.write_to_traj()
 
         if num_trans_attempted != 0:
@@ -175,6 +177,8 @@ def main():
     print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
     energy_file.write(str(mof_ads.current_potential_en) + '\n')
     energy_file.flush()
+    nvtw_ins_file.flush()
+    nvtw_rem_file.flush()
     mof_ads.write_to_traj()
 
     print("Simulation finished")
