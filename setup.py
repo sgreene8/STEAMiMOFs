@@ -17,12 +17,12 @@ setup(
     author_email='samuel.greene@austin.utexas.edu',
     url='https://github.com/sgreene8/STEAMiMOFs',
     license=license,
-    packages=find_packages(include=["STEAMiMOFs", "STEAMiMOFs.*", "STEAMiMOFs.packages.*"]),
+    packages=find_packages(include=["STEAMiMOFs", "STEAMiMOFs.*"]),
     entry_points={
         # make the scripts available as command line scripts
         "console_scripts": [
-            "STEAMiMOFs-nvtw = STEAMiMOFs.nvtw:main",
-            "STEAMiMOFs-enthalpy = STEAMiMOFs.enthalpy:main"
+            "STEAMiMOFs-nvtw = STEAMiMOFs.scripts.nvtw:main",
+            "STEAMiMOFs-enthalpy = STEAMiMOFs.scripts.enthalpy:main"
         ]
     },
     install_requires=[
