@@ -166,10 +166,10 @@ def main():
                     num_rot_accepted += 1
             elif rn < cumu_insert:
                 nvtw_prob = mof_ads.insert_h2o(keep=False)
-                nvtw_ins_file.write(str(nvtw_prob))
+                nvtw_ins_file.write(str(nvtw_prob) + '\n')
             else:
                 nvtw_prob = mof_ads.remove_h2o(put_back=True)
-                nvtw_rem_file.write(str(nvtw_prob))
+                nvtw_rem_file.write(str(nvtw_prob) + '\n')
     
 
     print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
