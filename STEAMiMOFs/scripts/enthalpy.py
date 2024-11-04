@@ -97,7 +97,7 @@ def main():
         en_slope_ax[loading_idx, 0].set_title('{} molecules'.format(loading))
 
         en_ax[loading_idx, 0].set_ylabel('Energy')
-        iat_ax[loading_idx, 0].set_ylabel('Energy')
+        iat_ax[loading_idx, 0].set_ylabel('IAT')
         en_slope_ax[loading_idx, 0].set_ylabel('Energy/iteration')
 
         iat_ax[loading_idx, 0].scatter(burn_in[nonoptimal_mask], iats[nonoptimal_mask], color='k')
@@ -107,13 +107,13 @@ def main():
         en_ax[loading_idx, 0].plot(energies)
         en_ax[loading_idx, 0].plot(2 * [optimal_burnin], [np.min(energies), np.max(energies)], 'k--')
 
-        en_slope_ax[loading_idx, 0].fill_between(range(slope_separation, num_en), np.min(slope), -args.burn_in_slope * loading, color=(0.5, 0.5, 0.5, 0.5))
-        en_slope_ax[loading_idx, 0].plot(range(slope_separation, num_en), slope)
+        en_slope_ax[loading_idx, 0].fill_between(range(slope_separation + 50, num_en), np.min(slope[50:]), -args.burn_in_slope * loading, color=(0.5, 0.5, 0.5, 0.5))
+        en_slope_ax[loading_idx, 0].plot(range(slope_separation + 50, num_en), slope[50:])
 
         mean_en = np.mean(energies[optimal_burnin:])
         std_err = (np.var(energies[optimal_burnin:]) / eff_samp_sizes[optimal_idx])**0.5
         print('Energy: {} ± {}'.format(mean_en, std_err))
-        outfile.write('{} {} {}'.format(loading, mean_en, std_err))
+        outfile.write('{} {} {}\n'.format(loading, mean_en, std_err))
     
     outfile.close()
     iat_fig.savefig('IAT.pdf', bbox_inches='tight')
