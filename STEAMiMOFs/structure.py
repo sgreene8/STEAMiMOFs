@@ -5,6 +5,7 @@ from ase.calculators.calculator import Calculator, all_changes
 import ase.io
 from ase import Atoms
 import numpy as np
+import pickle
 
 kb = 8.617333262e-5 # Boltzmann Constant, eV/K
 
@@ -46,6 +47,7 @@ class MOFWithAds:
         self.trans_max = 0.1 # originally 0.05
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
+        self.rng = np.random.default_rng()
 
         self._free_H2O_en = h2o_energy
         self.current_potential_en = self._atoms.get_potential_energy()
@@ -65,15 +67,15 @@ class MOFWithAds:
         """
         cell = self._atoms.get_cell()
 
-        O_frac_coords = np.random.rand(number, 3)
+        O_frac_coords = self.rng.random((number, 3))
         O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
 
         # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
-        OH_vectors = np.random.randn(number, 3)
+        OH_vectors = self.rng.standard_normal((number, 3))
         is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
         while (np.any(is_zero)):
             num_zero = np.sum(is_zero)
-            new_vecs = np.random.randn(num_zero, 3)
+            new_vecs = self.rng.standard_normal(num_zero, 3)
             OH_vectors[is_zero] = new_vecs
             is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
         OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
@@ -90,7 +92,7 @@ class MOFWithAds:
         x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
         y_vecs = np.cross(OH_vectors, x_vecs)
 
-        H2_angles = np.random.rand(number) * np.pi * 2
+        H2_angles = self.rng.random(number) * np.pi * 2
         # H-O-H angle should  be 104.52 degrees
         H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(104.52 / 180 * np.pi) + np.cos(104.52 / 180 * np.pi) * OH_vectors
         H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
@@ -133,7 +135,7 @@ class MOFWithAds:
         Returns:
             The NVT+W probability divided by the fugacity for the deletion.
         """
-        remove_idx = np.random.choice(self.nh2o, number)
+        remove_idx = self.rng.choice(self.nh2o, number)
         atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1) + self.n_MOF_atoms
         h2o_atoms = self._atoms[atom_idx]
         h2o_coords = h2o_atoms.get_positions()
@@ -164,12 +166,12 @@ class MOFWithAds:
             True if the rotation was accepted according to Metropolis criterion, False otherwise
         """
 
-        rot_vector = np.random.randn(3)
+        rot_vector = self.rng.standard_normal(3)
         rot_vector /= np.linalg.norm(rot_vector)
-        rot_angle = np.random.rand(1) * self.rot_max
+        rot_angle = self.rng.random(1) * self.rot_max
 
         if index is None:
-            index = np.random.randint(self.nh2o)
+            index = self.rng.integers(self.nh2o)
         
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
         com = h2o.get_center_of_mass()
@@ -200,7 +202,7 @@ class MOFWithAds:
         en_after = self._atoms.get_potential_energy()
 
         acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
-        if np.random.rand(1) < acc_ratio: # move is accepted
+        if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
             self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
             return True
@@ -218,10 +220,10 @@ class MOFWithAds:
             True if the translation was accepted according to Metropolis criterion, False otherwise
         """
 
-        trans_vector = (2 * np.random.rand(3) - 1) * self.trans_max
+        trans_vector = (2 * self.rng.random(3) - 1) * self.trans_max
 
         if index is None:
-            index = np.random.randint(self.nh2o)
+            index = self.rng.integers(self.nh2o)
         
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
         orig_h2o_pos = h2o.get_positions()
@@ -243,7 +245,7 @@ class MOFWithAds:
         en_after = self._atoms.get_potential_energy()
 
         acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
-        if np.random.rand(1) < acc_ratio: # move is accepted
+        if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
             self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
             return True
@@ -263,6 +265,20 @@ class MOFWithAds:
         else:
             ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
         self._traj_file.flush()
+
+    def save_rng_state(self, fname : str):
+        """
+        Saves the current state of the random number generator to a file
+        """
+        with open(fname, 'wb') as f:
+            pickle.dump(self.rng.bit_generator.state, f, pickle.HIGHEST_PROTOCOL)
+    
+    def load_rng_state(self, fname : str):
+        """
+        Loads the state of the random number generator from a file
+        """
+        with open(fname, 'rb') as f:
+            self.rng.state = pickle.load(f)
 
 
 class NullCalculator(Calculator):

@@ -2,7 +2,6 @@ import argparse
 from pathlib import Path
 import sys
 from STEAMiMOFs import structure
-import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(
@@ -101,6 +100,14 @@ def main():
         default=100000,
         required=False
     )
+
+    parser.add_argument(
+        "--rng_state_path",
+        help="Path to a file containing the state of the random number generator to initialize the calculation. Useful for debugging purposes.",
+        type=Path,
+        default=None,
+        required=False
+    )
     
 
     if len(sys.argv) == 1:
@@ -110,6 +117,9 @@ def main():
     args = parser.parse_args()
 
     mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, args.temperature, args.H2O_energy)
+
+    if args.rng_state_path is not None:
+        mof_ads.load_rng_state(args.rng_state_path)
 
     # Normalize probabilities
     tot_probability = args.translate_probability + args.rotate_probability + args.nvtw_insert_probability + args.nvtw_remove_probability
@@ -146,6 +156,7 @@ def main():
         nvtw_ins_file.flush()
         nvtw_rem_file.flush()
         mof_ads.write_to_traj()
+        mof_ads.save_rng_state('rng_state.dat')
 
         if num_trans_attempted != 0:
             print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted * 100))
@@ -153,7 +164,7 @@ def main():
             print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted * 100))
         
         for step in range(mc_steps_per_cycle):
-            rn = np.random.rand(1)
+            rn = mof_ads.rng.random(1)
             if rn < trans_prob:
                 num_trans_attempted += 1
                 success = mof_ads.translate_h2o()
