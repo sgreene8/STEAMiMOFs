@@ -19,7 +19,7 @@ cd ..
 ## Usage
 Following installation, the script named `STEAMiMOFs-nvtw` will be added to your `PATH`. This script can be used to perform a Monte Carlo calculation using the [flat-histogram NVT+W method](https://pubs.acs.org/doi/10.1021/acs.jpcc.0c11082). For example, the command
 ```bash
-STEAMiMOFs-nvtw --NNP_path deployed.pth --MOF_structure_path UiO-66.cif --num_h2o 10
+STEAMiMOFs-nvtw --NNP_path deployed.pth --MOF_structure_path UiO-66.cif --num_h2o 10 --H2O_energy="-.16875515E+02" 
 ```
 will launch a NVT+W calculation with 10 H2O molecules in the structure in the cif file `UiO-66.cif` using the Allegro model saved in `deployed.pth`. Simply running `STEAMiMOFs-nvtw` will print a detailed description of all arguments.
 
