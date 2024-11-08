@@ -37,7 +37,7 @@ def main():
 
     parser.add_argument(
         "--results_dir",
-        help="Path to the directory in which results, including isotherm data file and plot, should be saved",
+        help="Path to the directory in which results, including enthalpy data file and plot, should be saved",
         type=pathlib.Path,
         default='.',
         required=False
