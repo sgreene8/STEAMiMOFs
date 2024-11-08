@@ -22,6 +22,16 @@ class MOFWithAds:
         print('Using device {}'.format(device.type))
 
         self._atoms = ase.io.read(MOF_path)
+        self.n_MOF_atoms = len(self._atoms)
+
+        if H2O_path is not None:
+            H2O_atoms = ase.io.read(H2O_path, index=-1)
+            assert(len(H2O_atoms) % 3 == 0)
+            self.nh2o = len(H2O_atoms) // 3
+            self._atoms += H2O_atoms
+        else:
+            self.nh2o = 0
+        
         if model_path is None:
             self._atoms.calc = NullCalculator()
         else:
@@ -34,14 +44,6 @@ class MOFWithAds:
                     "Zr" : "Zr",
                 }
             )
-        self.n_MOF_atoms = len(self._atoms)
-
-        if H2O_path is not None:
-            H2O_atoms = ase.io.read(H2O_path, index=-1)
-            assert(len(H2O_atoms) % 3 == 0)
-            self.nh2o = len(H2O_atoms) // 3
-        else:
-            self.nh2o = 0
         
         self.rot_max = 45. / 180. * np.pi # maximum angle for MC rotation; originally 30 degrees
         self.trans_max = 0.1 # originally 0.05
@@ -55,6 +57,19 @@ class MOFWithAds:
         assert(self._H2O_forces.shape[1] == 3)
 
         self._traj_file = open(results_path / 'traj.pdb', 'a')
+    
+    def check_h2o_geom(self):
+        """
+        For debugging purposes, check that each H2O molecule has the correct O-H bond lengths and H-O-H bond angle
+        """
+        for index in range(self.nh2o):
+            print('Checking {} geometry'.format(index))
+            h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
+            h2o_pos = h2o.get_positions()
+            oh_bond_dist = np.linalg.norm(h2o_pos[1:] - h2o_pos[0], axis=1)
+            assert(np.allclose(oh_bond_dist, 0.95720))
+            hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / 0.95720**2)
+            assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
 
     def insert_h2o(self, number : int=1, keep=True) -> float:
         """
@@ -260,10 +275,11 @@ class MOFWithAds:
         Arguments:
             with_MOF: If true, the MOF atoms will be included in the output file
         """
+        # xyz gives more sig figs than PDB
         if with_MOF:
-            ase.io.write(self._traj_file, self._atoms, format='proteindatabank')
+            ase.io.write(self._traj_file, self._atoms, format='xyz')
         else:
-            ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='proteindatabank')
+            ase.io.write(self._traj_file, self._atoms[self.n_MOF_atoms:], format='xyz')
         self._traj_file.flush()
 
     def save_rng_state(self, fname : str):
@@ -278,7 +294,7 @@ class MOFWithAds:
         Loads the state of the random number generator from a file
         """
         with open(fname, 'rb') as f:
-            self.rng.state = pickle.load(f)
+            self.rng.bit_generator.state = pickle.load(f)
 
 
 class NullCalculator(Calculator):
