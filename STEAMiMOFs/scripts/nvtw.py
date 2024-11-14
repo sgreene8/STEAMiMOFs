@@ -184,8 +184,16 @@ def main():
     
 
     print("Cycle {} of {}: energy = {} eV".format(args.num_cycles, args.num_cycles, mof_ads.current_potential_en))
-    print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, float(num_trans_accepted) / num_trans_attempted))
-    print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, float(num_rot_accepted) / num_rot_attempted))
+    if (num_trans_attempted > 0):
+        trans_accept = float(num_trans_accepted) / num_trans_attempted
+    else:
+        trans_accept = float('NaN')
+    print("Translation moves accepted: {} of {} ({:.2f}%)".format(num_trans_accepted, num_trans_attempted, trans_accept))
+    if (num_rot_attempted > 0):
+        rot_accept = float(num_rot_accepted) / num_rot_attempted
+    else:
+        rot_accept = float('NaN')
+    print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, rot_accept))
     energy_file.write(str(mof_ads.current_potential_en) + '\n')
     energy_file.flush()
     nvtw_ins_file.flush()
