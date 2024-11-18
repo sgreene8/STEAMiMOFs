@@ -1,11 +1,12 @@
 from pathlib import Path
 import torch
-from nequip.ase import NequIPCalculator
-from ase.calculators.calculator import Calculator, all_changes
 import ase.io
 from ase import Atoms
 import numpy as np
 import pickle
+import nequip.scripts.deploy
+from nequip.data.transforms import TypeMapper
+from nequip.data import AtomicData, AtomicDataDict
 
 kb = 8.617333262e-5 # Boltzmann Constant, eV/K
 
@@ -18,8 +19,8 @@ class MOFWithAds:
     """
 
     def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path='.', temperature : float=298., h2o_energy : float=0.):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print('Using device {}'.format(device.type))
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print('Using device {}'.format(self._device.type))
 
         self._atoms = ase.io.read(MOF_path)
         self.n_MOF_atoms = len(self._atoms)
@@ -33,17 +34,32 @@ class MOFWithAds:
             self.nh2o = 0
         
         if model_path is None:
-            self._atoms.calc = NullCalculator()
+            self._model = None
         else:
-            self._atoms.calc = NequIPCalculator.from_deployed_model(
-                model_path = model_path,
-                species_to_type_name = {
-                    "H" : "H",
-                    "C" : "C",
-                    "O" : "O",
-                    "Zr" : "Zr",
-                }
-            )
+            # Setup potential
+            # Code adapted from nequip.ase.nequip_calculator
+            self._model, metadata = nequip.scripts.deploy.load_deployed_model(
+                                model_path=model_path,
+                                device=self._device,
+                                set_global_options="warn",
+                            )
+            self._r_max = float(metadata[nequip.scripts.deploy.R_MAX_KEY])
+            # build typemapper
+            species_to_type_name = {
+                        "H" : "H",
+                        "C" : "C",
+                        "O" : "O",
+                        "Zr" : "Zr",
+                    }
+            type_names = metadata[nequip.scripts.deploy.TYPE_NAMES_KEY].split(" ")
+            type_name_to_index = {n: i for i, n in enumerate(type_names)}
+            chemical_symbol_to_type = {
+                sym: type_name_to_index[species_to_type_name[sym]]
+                for sym in ase.data.chemical_symbols
+                if sym in type_name_to_index
+            }
+            assert(len(chemical_symbol_to_type) == len(type_names))
+            self._transform = TypeMapper(chemical_symbol_to_type=chemical_symbol_to_type)
         
         self.rot_max = 45. / 180. * np.pi # maximum angle for MC rotation; originally 30 degrees
         self.trans_max = 0.1 # originally 0.05
@@ -52,11 +68,24 @@ class MOFWithAds:
         self.rng = np.random.default_rng()
 
         self._free_H2O_en = h2o_energy
-        self.current_potential_en = self._atoms.get_potential_energy()
-        self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+        self.current_potential_en, self._H2O_forces = self._evaluate_potential()
         assert(self._H2O_forces.shape[1] == 3)
 
         self._traj_file = open(results_path / 'traj.pdb', 'a')
+    
+    def _evaluate_potential(self):
+        if self._model is not None:
+            data = AtomicData.from_ase(atoms=self._atoms, r_max=self._r_max)
+            data = self._transform(data)
+            data = data.to(self._device)
+            data = AtomicData.to_AtomicDataDict(data)
+            out = self._model(data)
+            energy = out[AtomicDataDict.TOTAL_ENERGY_KEY][0, 0].detach().cpu().numpy()
+            forces = out[AtomicDataDict.FORCE_KEY][self.n_MOF_atoms:].detach().cpu().numpy()
+        else:
+            energy = 0.0
+            forces = np.zeros([self.nh2o * 3, 3])
+        return energy, forces
     
     def check_h2o_geom(self):
         """
@@ -124,7 +153,8 @@ class MOFWithAds:
         self._atoms += h2o_atoms
         self.nh2o += number
 
-        en_after = self._atoms.get_potential_energy()
+        en_after, forces_after = self._evaluate_potential()
+
         # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
@@ -134,7 +164,7 @@ class MOFWithAds:
         )
         if keep:
             self.current_potential_en = en_after
-            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+            self._H2O_forces = forces_after
         else:
             del self._atoms[(-3 * number):]
             self.nh2o -= number
@@ -155,7 +185,8 @@ class MOFWithAds:
         h2o_atoms = self._atoms[atom_idx]
         h2o_coords = h2o_atoms.get_positions()
         del self._atoms[atom_idx]
-        en_after = self._atoms.get_potential_energy()
+        en_after, forces_after = self._evaluate_potential()
+
         # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
@@ -168,7 +199,7 @@ class MOFWithAds:
         else:
             self.nh2o -= number
             self.current_potential_en = en_after
-            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+            self._H2O_forces = forces_after
         return acc_prob
         
     
@@ -214,18 +245,18 @@ class MOFWithAds:
 
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
-        en_after = self._atoms.get_potential_energy()
+        en_after, forces_after = self._evaluate_potential()
 
         acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
         if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
-            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+            self._H2O_forces = forces_after
             return True
         else: # move is rejected
             for atom_idx in range(3):
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
-    
+
     def translate_h2o(self, index=None) -> float:
         """
         Translate an h2o molecule in the cell in a randomly chosen direction by a randomly chosen displacement.
@@ -257,12 +288,12 @@ class MOFWithAds:
 
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
-        en_after = self._atoms.get_potential_energy()
+        en_after, forces_after = self._evaluate_potential()
 
         acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
         if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
-            self._H2O_forces = self._atoms.get_forces(apply_constraint=False)[self.n_MOF_atoms:]
+            self._H2O_forces = forces_after
             return True
         else: # move is rejected
             for atom_idx in range(3):
@@ -295,13 +326,3 @@ class MOFWithAds:
         """
         with open(fname, 'rb') as f:
             self.rng.bit_generator.state = pickle.load(f)
-
-
-class NullCalculator(Calculator):
-    """
-    ASE Calculator that returns zero energy and forces (for debugging purposes)
-    """
-    implemented_properties = ["energy", "forces"]
-
-    def calculate(self, atoms=None, properties=["energy"], system_changes=all_changes):
-        self.results = {'energy': 0.0, 'forces': np.zeros((len(atoms), 3))}
