@@ -7,9 +7,10 @@ import STEAMiMOFs.structure
 import numpy as np
 import matplotlib.pyplot as plt
 from ase.calculators.lj import LennardJones
+from pathlib import Path
 
 def test_H2O_insertion(tot_samples=100000):
-    h2oMOF = STEAMiMOFs.structure.MOFWithAds('deployed_model_50_sam.pth', 'RUBTAK01_SL.cif')
+    h2oMOF = STEAMiMOFs.structure.MOFWithAds('deployed_model_50_sam.pth', Path('RUBTAK01_SL.cif'))
     n_MOF_atoms = h2oMOF.n_MOF_atoms
     h2oMOF.insert_h2o(tot_samples)
 

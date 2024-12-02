@@ -108,6 +108,29 @@ def main():
         default=None,
         required=False
     )
+
+    parser.add_argument(
+        "--sampling_scheme",
+        choices=["Metropolis", "MALA"],
+        default="MALA",
+        help="Sampling scheme, either standard Metropolis with uniform proposal densities, or Metropolis-adjusted Langevin algorithm with gradients"
+    )
+
+    parser.add_argument(
+        "--translation_stepsize",
+        type=float,
+        default=0.1,
+        required=False,
+        help="Width (in Angstroms) of the normal distribution from which translation moves will be sampled"
+    )
+
+    parser.add_argument(
+        "--rotation_stepsize",
+        type=float,
+        default=45,
+        required=False,
+        help="Width (in degrees) of the normal distribution from which rotation moves will be sampled"
+    )
     
 
     if len(sys.argv) == 1:
@@ -116,7 +139,8 @@ def main():
     
     args = parser.parse_args()
 
-    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, args.temperature, args.H2O_energy)
+    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, 
+                                   args.temperature, args.H2O_energy, args.translation_stepsize, args.rotation_stepsize)
 
     if args.rng_state_path is not None:
         mof_ads.load_rng_state(args.rng_state_path)
@@ -153,8 +177,10 @@ def main():
         print("Cycle {} of {}: energy = {} eV".format(cycle, args.num_cycles, mof_ads.current_potential_en))
         energy_file.write(str(mof_ads.current_potential_en) + '\n')
         energy_file.flush()
-        nvtw_ins_file.flush()
-        nvtw_rem_file.flush()
+        if nvtw_ins_prob > 0:
+            nvtw_ins_file.flush()
+        if nvtw_rem_prob > 0:
+            nvtw_rem_file.flush()
         mof_ads.write_to_traj()
         mof_ads.save_rng_state('rng_state.dat')
 
@@ -167,12 +193,12 @@ def main():
             rn = mof_ads.rng.random(1)
             if rn < trans_prob:
                 num_trans_attempted += 1
-                success = mof_ads.translate_h2o()
+                success = mof_ads.translate_h2o(sampling=args.sampling_scheme)
                 if success:
                     num_trans_accepted += 1
             elif rn < cumu_rotate:
                 num_rot_attempted += 1
-                success = mof_ads.rotate_h2o()
+                success = mof_ads.rotate_h2o(sampling=args.sampling_scheme)
                 if success:
                     num_rot_accepted += 1
             elif rn < cumu_insert:
@@ -196,8 +222,10 @@ def main():
     print("Rotation moves accepted: {} of {} ({:.2f}%)".format(num_rot_accepted, num_rot_attempted, rot_accept))
     energy_file.write(str(mof_ads.current_potential_en) + '\n')
     energy_file.flush()
-    nvtw_ins_file.flush()
-    nvtw_rem_file.flush()
+    if nvtw_ins_prob > 0:
+       nvtw_ins_file.flush()
+    if nvtw_rem_prob > 0:
+        nvtw_rem_file.flush()
     mof_ads.write_to_traj()
 
     print("Simulation finished")

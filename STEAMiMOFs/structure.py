@@ -18,7 +18,8 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path='.', temperature : float=298., h2o_energy : float=0.):
+    def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
+                 temperature : float=298., h2o_energy : float=0., trans_step : float=0.1, rot_step : float=45):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(self._device.type))
 
@@ -61,8 +62,9 @@ class MOFWithAds:
             assert(len(chemical_symbol_to_type) == len(type_names))
             self._transform = TypeMapper(chemical_symbol_to_type=chemical_symbol_to_type)
         
-        self.rot_max = 45. / 180. * np.pi # maximum angle for MC rotation; originally 30 degrees
-        self.trans_max = 0.1 # originally 0.05
+        self.rot_step = abs(rot_step) / 180. * np.pi
+        assert(self.rot_step < np.pi)
+        self.trans_step = abs(trans_step)
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
         self.rng = np.random.default_rng()
@@ -86,6 +88,17 @@ class MOFWithAds:
             energy = 0.0
             forces = np.zeros([self.nh2o * 3, 3])
         return energy, forces
+    
+    def _calculate_torque(self, index : int):
+        """
+        Calculate the torque on a rigid adsorbate and its center of mass
+        """
+        h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
+        com = h2o.get_center_of_mass()
+        h2o_pos = h2o.get_positions()
+        h2o_rel = orig_h2o_pos - orig_com
+        torque = np.sum(np.cross(orig_h2o_rel, self._H2O_forces[(3 * index):(3 * index + 3)]), axis=0)
+        return com, torque
     
     def check_h2o_geom(self):
         """
@@ -201,53 +214,72 @@ class MOFWithAds:
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
         return acc_prob
-        
     
-    def rotate_h2o(self, index=None) -> float:
+    def rotate_h2o(self, index : int=-1, sampling : str="MALA") -> bool:
         """
         Rotate an h2o molecule in the cell about a randomly chosen axis by a randomly chosen angle.
         Arguments:
             index: If None, an h2o molecule is chosen at random, otherwise the molecule at the specified index is chosen
+            sampling: Monte Carlo sampling scheme to use, either MALA (Metropolis-adjusted Langevin) or Metropolis
         Returns:
-            True if the rotation was accepted according to Metropolis criterion, False otherwise
+            True if the rotation was accepted according to Metropolis-Hastings criterion, False otherwise
         """
 
-        rot_vector = self.rng.standard_normal(3)
-        rot_vector /= np.linalg.norm(rot_vector)
-        rot_angle = self.rng.random(1) * self.rot_max
+        if not(sampling == "MALA" or sampling == "Metropolis"):
+            raise ValueError("MOFWithAds.rotate_h2o sampling argument must be either 'MALA' or 'Metropolis'")
 
-        if index is None:
+        rot_vector = self.rng.standard_normal(3)
+        rot_angle = self.rng.standard_normal() * self.rot_step
+        if rot_angle > np.pi:
+            rot_angle -= 2 * np.pi
+        if rot_angle < -np.pi:
+            rot_angle += 2 * np.pi
+        rot_matrix_rand = _calc_rot_matrix(rot_angle, rot_vector)
+
+        if index == -1:
             index = self.rng.integers(self.nh2o)
         
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
-        com = h2o.get_center_of_mass()
+        orig_com = h2o.get_center_of_mass()
         orig_h2o_pos = h2o.get_positions()
+        orig_h2o_rel = orig_h2o_pos - orig_com
+        new_h2o_rel = orig_h2o_rel
 
-        # see https://stackoverflow.com/questions/6721544/circular-rotation-around-an-arbitrary-axis
-        q = np.array([np.cos(rot_angle / 2)] + 3 * [np.sin(rot_angle / 2)])
-        q.shape = -1
-        q[1:] *= rot_vector
-        rot_matrix = np.array([
-            [q[0]**2 + q[1]**2 - q[2]**2 - q[3]**2, 2 * (q[1] * q[2] - q[0] * q[3]), 2 * (q[1] * q[3] + q[0] * q[2])],
-            [2 * (q[2] * q[1] + q[0] * q[3]), q[0]**2 - q[1]**2 + q[2]**2 - q[3]**2, 2 * (q[2] * q[3] - q[0] * q[1])],
-            [2 * (q[3] * q[1] - q[0] * q[2]), 2 * (q[3] * q[2] + q[0] * q[1]), q[0]**2 - q[1]**2 - q[2]**2 + q[3]**2]
-        ])
+        if sampling=="MALA":
+            orig_torque = np.sum(np.cross(orig_h2o_rel, self._H2O_forces[(3 * index):(3 * index + 3)]), axis=0)
+            torque_angle = np.linalg.norm(orig_torque) * self.rot_step**2 / 2 / kb / self.temperature
+            rot_matrix_torque = _calc_rot_matrix(torque_angle, orig_torque)
+            new_h2o_rel = orig_h2o_rel @ rot_matrix_torque.T
 
-        new_h2o_pos = orig_h2o_pos - com
-        new_h2o_pos = new_h2o_pos @ rot_matrix
-        new_h2o_pos += com
+        new_h2o_rel = new_h2o_rel @ rot_matrix_rand.T
+        new_h2o_pos = orig_com + new_h2o_rel
+
+        for atom_idx in range(3):
+            self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
         assert(np.allclose(oh_bond_dist, 0.95720))
         hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
         assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
+        new_com = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_center_of_mass()
+        assert(np.allclose(new_com, orig_com))
 
-        for atom_idx in range(3):
-            self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after, forces_after = self._evaluate_potential()
+        exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
 
-        acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
+        if sampling=="MALA":
+            new_torque = np.sum(np.cross(new_h2o_rel, self._H2O_forces[(3 * index):(3 * index + 3)]), axis=0)
+            new_torque_angle = np.linalg.norm(new_torque) * self.rot_step**2 / 2 / kb / self.temperature
+            rot_matrix_newtorque = _calc_rot_matrix(new_torque_angle, new_torque)
+            new_rel_torqued = new_h2o_rel @ rot_matrix_newtorque.T
+            new_rot_angle = _calc_rot_angle(new_rel_torqued, orig_h2o_rel)
+            # new_prob = np.exp(-rot_angle**2 / 2 / self.rot_step**2) # Prob. of sampling new_h2o_pos given orig_h2o_pos
+            # old_prob = np.exp(-new_rot_angle**2 / 2 / self.rot_step**2) # Prob. of sampling orig_h2o_pos given new_h2o_pos
+            # proposal_ratio = old_prob / new_prob
+            exp_argument += (-new_rot_angle**2 + rot_angle**2) / 2 / self.rot_step**2
+
+        acc_ratio = np.exp(exp_argument)
         if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
@@ -257,23 +289,32 @@ class MOFWithAds:
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
 
-    def translate_h2o(self, index=None) -> float:
+    def translate_h2o(self, index : int=None, sampling : str="MALA") -> bool:
         """
         Translate an h2o molecule in the cell in a randomly chosen direction by a randomly chosen displacement.
         Arguments:
             index: If None, an h2o molecule is chosen at random, otherwise the molecule at the specified index is chosen
+            sampling: Monte Carlo sampling scheme to use, either MALA (Metropolis-adjusted Langevin) or Metropolis
         Returns:
-            True if the translation was accepted according to Metropolis criterion, False otherwise
+            True if the translation was accepted according to Metropolis-Hastings criterion, False otherwise
         """
 
-        trans_vector = (2 * self.rng.random(3) - 1) * self.trans_max
+        if not(sampling == "MALA" or sampling == "Metropolis"):
+            raise ValueError("MOFWithAds.rotate_h2o sampling argument must be either 'MALA' or 'Metropolis'")
+        
+        trans_vector = self.rng.standard_normal(3) * self.trans_step
 
         if index is None:
             index = self.rng.integers(self.nh2o)
         
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
+        orig_com = h2o.get_center_of_mass()
         orig_h2o_pos = h2o.get_positions()
+
         new_h2o_pos = orig_h2o_pos + trans_vector
+        if sampling=="MALA":
+            orig_com_force = np.sum(self._H2O_forces[(3 * index):(3 * index + 3)], axis=0) # Force on center of mass
+            new_h2o_pos += self.trans_step**2 / 2 / kb / self.temperature * orig_com_force
 
         # Periodic boundary conditions
         new_scaled = self._atoms.cell.scaled_positions(new_h2o_pos)
@@ -281,16 +322,27 @@ class MOFWithAds:
         new_scaled[:, new_scaled[0] < 0.] += 1
         new_h2o_pos = self._atoms.cell.cartesian_positions(new_scaled)
 
+        for atom_idx in range(3):
+            self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
+
+        # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
         assert(np.allclose(oh_bond_dist, 0.95720))
         hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
         assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
 
-        for atom_idx in range(3):
-            self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
         en_after, forces_after = self._evaluate_potential()
+        exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
 
-        acc_ratio = np.exp(-(en_after - self.current_potential_en) / self.temperature / kb)
+        if sampling=="MALA":
+            new_com_force = np.sum(forces_after[(3 * index):(3 * index + 3)], axis=0)
+            new_trans_vector = new_h2o_pos - orig_h2o_pos + self.trans_step**2 / 2 / kb / self.temperature * new_com_force
+            # new_prob = np.exp(-np.linalg.norm(trans_vector)**2 / 2 / self.trans_step**2) # Prob. of sampling new_h2o_pos given orig_h2o_pos
+            # old_prob = np.exp(-np.linalg.norm(new_trans_vector)**2 / 2 / self.trans_step**2)  # Prob. of sampling orig_h2o_pos given new_h2o_pos
+            # proposal_ratio = old_prob / new_prob
+            exp_argument += (-np.linalg.norm(new_trans_vector)**2 + np.linalg.norm(trans_vector)**2) / 2 / self.trans_step**2
+
+        acc_ratio = np.exp(exp_argument)
         if self.rng.random(1) < acc_ratio: # move is accepted
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
@@ -300,7 +352,7 @@ class MOFWithAds:
                 self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
             return False
         
-    def write_to_traj(self, with_MOF=False):
+    def write_to_traj(self, with_MOF: bool=False):
         """
         Saves a snapshot of the current H2O positions to the trajectory file
         Arguments:
@@ -326,3 +378,43 @@ class MOFWithAds:
         """
         with open(fname, 'rb') as f:
             self.rng.bit_generator.state = pickle.load(f)
+
+
+def _calc_rot_angle(pos1, pos2) -> float:
+    """
+    Given coordinates of 2 adsorbates with the same center of mass, calculate the absolute value of the angle of the rotation that relates them
+    """
+    molecule1 = Atoms('OHH', positions=pos1)
+    molecule2 = Atoms('OHH', positions=pos2)
+
+    com1 = molecule1.get_center_of_mass()
+    com2 = molecule2.get_center_of_mass()
+    assert(np.allclose(com1, com2))
+
+    rel1 = pos1 - com1
+    rel2 = pos2 - com2
+
+    ghost1 = np.cross(rel1[1], rel1[2])
+    ghost2 = np.cross(rel2[1], rel2[2])
+    rel1[0] = ghost1
+    rel2[0] = ghost2
+
+    rot = np.linalg.solve(rel1, rel2).T
+    angle = np.arccos((np.trace(rot) - 1) / 2)
+    return angle
+
+def _calc_rot_matrix(angle: float, axis):
+    """
+    Calculate a rotation matrix given the angle and axis of rotation
+    see https://stackoverflow.com/questions/6721544/circular-rotation-around-an-arbitrary-axis
+    """
+
+    axis_normalized = axis / np.linalg.norm(axis)
+
+    q = np.array([np.cos(angle / 2)] + 3 * [np.sin(angle / 2)])
+    q[1:] *= axis_normalized
+    return np.array([
+        [q[0]**2 + q[1]**2 - q[2]**2 - q[3]**2, 2 * (q[1] * q[2] - q[0] * q[3]), 2 * (q[1] * q[3] + q[0] * q[2])],
+        [2 * (q[2] * q[1] + q[0] * q[3]), q[0]**2 - q[1]**2 + q[2]**2 - q[3]**2, 2 * (q[2] * q[3] - q[0] * q[1])],
+        [2 * (q[3] * q[1] - q[0] * q[2]), 2 * (q[3] * q[2] + q[0] * q[1]), q[0]**2 - q[1]**2 - q[2]**2 + q[3]**2]
+    ])
