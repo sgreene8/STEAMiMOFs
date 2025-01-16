@@ -73,7 +73,7 @@ class MOFWithAds:
         self.current_potential_en, self._H2O_forces = self._evaluate_potential()
         assert(self._H2O_forces.shape[1] == 3)
 
-        self._traj_file = open(results_path / 'traj.pdb', 'a')
+        self._traj_file = open(results_path / 'traj.xyz', 'a')
     
     def _evaluate_potential(self):
         if self._model is not None:
@@ -230,10 +230,9 @@ class MOFWithAds:
 
         rot_vector = self.rng.standard_normal(3)
         rot_angle = self.rng.standard_normal() * self.rot_step
-        if rot_angle > np.pi:
-            rot_angle -= 2 * np.pi
-        if rot_angle < -np.pi:
-            rot_angle += 2 * np.pi
+        while(abs(rot_angle) > np.pi):
+            print('angle too large')
+            rot_angle = self.rng.standard_normal() * self.rot_step
         rot_matrix_rand = _calc_rot_matrix(rot_angle, rot_vector)
 
         if index == -1:
@@ -269,7 +268,7 @@ class MOFWithAds:
         exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
 
         if sampling=="MALA":
-            new_torque = np.sum(np.cross(new_h2o_rel, self._H2O_forces[(3 * index):(3 * index + 3)]), axis=0)
+            new_torque = np.sum(np.cross(new_h2o_rel, forces_after[(3 * index):(3 * index + 3)]), axis=0)
             new_torque_angle = np.linalg.norm(new_torque) * self.rot_step**2 / 2 / kb / self.temperature
             rot_matrix_newtorque = _calc_rot_matrix(new_torque_angle, new_torque)
             new_rel_torqued = new_h2o_rel @ rot_matrix_newtorque.T
@@ -337,6 +336,7 @@ class MOFWithAds:
         if sampling=="MALA":
             new_com_force = np.sum(forces_after[(3 * index):(3 * index + 3)], axis=0)
             new_trans_vector = new_h2o_pos - orig_h2o_pos + self.trans_step**2 / 2 / kb / self.temperature * new_com_force
+            new_trans_vector = new_trans_vector[0]
             # new_prob = np.exp(-np.linalg.norm(trans_vector)**2 / 2 / self.trans_step**2) # Prob. of sampling new_h2o_pos given orig_h2o_pos
             # old_prob = np.exp(-np.linalg.norm(new_trans_vector)**2 / 2 / self.trans_step**2)  # Prob. of sampling orig_h2o_pos given new_h2o_pos
             # proposal_ratio = old_prob / new_prob

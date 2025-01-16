@@ -43,6 +43,7 @@ def main():
         "--temperature",
         help="Temperature of the simulation in K",
         default=298.,
+        type=float,
         required=False
     )
 
