@@ -195,8 +195,7 @@ class MOFWithAds:
         """
         remove_idx = self.rng.choice(self.nh2o, number)
         atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1) + self.n_MOF_atoms
-        h2o_atoms = self._atoms[atom_idx]
-        h2o_coords = h2o_atoms.get_positions()
+        original_atoms = self._atoms.copy()
         del self._atoms[atom_idx]
         en_after, forces_after = self._evaluate_potential()
 
@@ -208,7 +207,7 @@ class MOFWithAds:
             / 101325 # J/m^3 to atm
         )
         if put_back:
-            self._atoms += h2o_atoms
+            self._atoms = original_atoms
         else:
             self.nh2o -= number
             self.current_potential_en = en_after
