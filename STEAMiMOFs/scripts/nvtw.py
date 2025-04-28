@@ -48,9 +48,9 @@ def main():
     )
 
     parser.add_argument(
-        "--H2O_energy",
-        help="Internal energy of a free H2O molecule, usually calculated using the same DFT setup used to generate training data for the potential",
-        type=float,
+        "--H2O_DFT_data_path",
+        help="YAML file containing the DFT energy of the H2O molecule, the O-H bond length, and the H-O-H angle. The file should contain the following keys: 'energy', 'rOH', and 'aHOH'.",
+        type=Path,
         required=True
     )
 
@@ -158,8 +158,8 @@ def main():
     
     args = parser.parse_args()
 
-    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, 
-                                   args.temperature, args.H2O_energy, args.translation_stepsize, args.rotation_stepsize,
+    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_DFT_data_path, args.H2O_structure_path, args.results_dir, 
+                                   args.temperature, args.translation_stepsize, args.rotation_stepsize,
                                    args.ngrid_O, args.ngrid_H1, args.ngrid_H2)
 
     if args.rng_seed is not None:

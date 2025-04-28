@@ -8,12 +8,9 @@ import nequip.scripts.deploy
 from nequip.data.transforms import TypeMapper
 from nequip.data import AtomicData, AtomicDataDict
 from typing import Union
+import yaml
 
 kb = 8.617333262e-5 # Boltzmann Constant, eV/K
-# rOH = 0.95720 # O-H distance should be 0.95720 angstroms for vdW-DF USPP
-# aHOH = 104.52 / 180 * np.pi # H-O-H angle should  be 104.52 degrees for vdW-DF USPP
-rOH = 0.97066 # O-H distance should be 0.95720 angstroms for vdW-DF PAW
-aHOH = 103.7427 / 180 * np.pi # H-O-H angle should be 103.7427 degrees for vdW-DF PAW
 
 class MOFWithAds:
     """
@@ -23,8 +20,8 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
-                 temperature : float=298., h2o_energy : float=0., trans_step : float=0.1, rot_step : float=45,
+    def __init__(self, model_path : Path, MOF_path : Path, H2O_DFT_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
+                 temperature : float=298., trans_step : float=0.1, rot_step : float=45,
                  ngrid_O : int=10, ngrid_H1 : int=10, ngrid_H2 : int=10):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(self._device.type))
@@ -33,10 +30,10 @@ class MOFWithAds:
         self.n_MOF_atoms = len(self._atoms)
 
         # eq (20), Rappé et al., J. Am. Chem. Soc. 1992, 114, 10024 (UFF)
-        LJ_distance = {'H': 2.886, 'O': 3.5, 'Zr': 3.124, 'C': 3.851} # Angstroms
-        LJ_energy = {'H': 0.044, 'O': 0.060, 'Zr': 0.069, 'C': 0.105} # kcal/mol
-        self._mof_LJ_eps = np.array([LJ_energy[atom.symbol] for atom in self._atoms]) * 0.043 # eV
-        self._mof_LJ_sigma = np.array([LJ_distance[atom.symbol] for atom in self._atoms])
+        # LJ_distance = {'H': 2.886, 'O': 3.5, 'Zr': 3.124, 'C': 3.851} # Angstroms
+        # LJ_energy = {'H': 0.044, 'O': 0.060, 'Zr': 0.069, 'C': 0.105} # kcal/mol
+        # self._mof_LJ_eps = np.array([LJ_energy[atom.symbol] for atom in self._atoms]) * 0.043 # eV
+        # self._mof_LJ_sigma = np.array([LJ_distance[atom.symbol] for atom in self._atoms])
 
         self._ngrid_O = ngrid_O
         self._ngrid_H1 = ngrid_H1
@@ -78,6 +75,15 @@ class MOFWithAds:
             assert(len(chemical_symbol_to_type) == len(type_names))
             self._transform = TypeMapper(chemical_symbol_to_type=chemical_symbol_to_type)
         
+        if H2O_DFT_path is None:
+            raise ValueError('H2O DFT path must be provided')
+        else:
+            with open(H2O_DFT_path, 'rb') as file:
+                h2o_data = yaml.safe_load(file)
+                self._free_H2O_en = h2o_data['DFT_energy']
+                self._rOH = h2o_data['rOH']
+                self._aHOH = h2o_data['aHOH'] / 180. * np.pi
+        
         self.rot_step = abs(rot_step) / 180. * np.pi
         assert(self.rot_step < np.pi)
         self.trans_step = abs(trans_step)
@@ -85,7 +91,6 @@ class MOFWithAds:
         self.volume = self._atoms.get_volume() # Angstroms^3
         self.rng = np.random.default_rng()
 
-        self._free_H2O_en = h2o_energy
         self.current_potential_en, self._H2O_forces = self._evaluate_potential()
         assert(self._H2O_forces.shape[1] == 3)
 
@@ -125,8 +130,8 @@ class MOFWithAds:
             h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
             h2o_pos = h2o.get_positions()
             oh_bond_dist = np.linalg.norm(h2o_pos[1:] - h2o_pos[0], axis=1)
-            assert(np.allclose(oh_bond_dist, rOH))
-            hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / rOH**2)
+            assert(np.allclose(oh_bond_dist, self._rOH))
+            hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / self._rOH**2)
             assert(np.allclose(hoh_bond_angle, aHOH))
 
     def insert_h2o(self, number : int=1, keep=True) -> float:
@@ -167,10 +172,10 @@ class MOFWithAds:
 
         H2_angles = self.rng.random(number) * np.pi * 2
         
-        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(aHOH) + np.cos(aHOH) * OH_vectors
+        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
         H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-        H2_vecs *= rOH
-        OH_vectors *= rOH
+        H2_vecs *= self._rOH
+        OH_vectors *= self._rOH
 
         h2o_coords = np.zeros([number, 3, 3]) # O, H1, H2
         h2o_coords[:, 0] = O_cart_coords
@@ -241,10 +246,10 @@ class MOFWithAds:
 
             H2_angles = self.rng.random(n_sample) * np.pi * 2
             
-            H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(aHOH) + np.cos(aHOH) * OH_vectors
+            H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
             H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-            H2_vecs *= rOH
-            OH_vectors *= rOH
+            H2_vecs *= self._rOH
+            OH_vectors *= self._rOH
 
             h2o_coords = np.zeros([n_sample, 3, 3]) # O, H1, H2
             h2o_coords[:, 0] = O_cart_coords
@@ -316,7 +321,7 @@ class MOFWithAds:
         distances = np.linalg.norm(cart_coords[1] - H1_cart_pos, axis=-1)
         H1_idx = np.argmin(distances)
         H1_idx = np.unravel_index(H1_idx, distances.shape)
-        assert(distances[H1_idx] < rOH * 2 * np.pi / self._ngrid_H1)
+        assert(distances[H1_idx] < self._rOH * 2 * np.pi / self._ngrid_H1)
         rosen *= np.sum(probs)
 
         H2_cart_pos, H2_probs = self._insert_probs_ring(cart_coords[0], cart_coords[1], n_grid=self._ngrid_H2, rotation_origin=cart_coords[2])
@@ -331,7 +336,7 @@ class MOFWithAds:
         return rosen
 
     
-    def _insert_probs_ring(self, origin, satellite, radius : float=rOH, angle : float=aHOH, n_grid : int=10, rotation_origin=None):
+    def _insert_probs_ring(self, origin, satellite, radius : float, angle : float, n_grid : int=10, rotation_origin=None):
         """
         Calculate the normalized Boltzmann probabilities associated with inserting a particle at each of the points on a 
         ring at a certain radius from the origin with a certain bond angle with respect to the origin and satellite points
@@ -374,15 +379,15 @@ class MOFWithAds:
         assert(abs(np.linalg.norm(y_vec) - 1) < 1e-8)
 
         angles = np.linspace(0, np.pi * 2, num=n_grid, endpoint=False)
-        new_vecs = (np.cos(angles)[:, np.newaxis] * x_vec + np.sin(angles)[:, np.newaxis] * y_vec) * np.sin(aHOH) + np.cos(aHOH) * bond_vector
-        assert(np.allclose(np.arccos(np.einsum('vc,c->v', new_vecs, bond_vector)), aHOH))
-        cart_coords = origin + new_vecs * rOH
+        new_vecs = (np.cos(angles)[:, np.newaxis] * x_vec + np.sin(angles)[:, np.newaxis] * y_vec) * np.sin(self._aHOH) + np.cos(self._aHOH) * bond_vector
+        assert(np.allclose(np.arccos(np.einsum('vc,c->v', new_vecs, bond_vector)), self._aHOH))
+        cart_coords = origin + new_vecs * self._rOH
 
         frac_grid = np.linalg.solve(cell.T, cart_coords.T).T
         probs = self._calc_LJ_Boltzmann_probs(frac_grid, 'H')
         return cart_coords, probs
     
-    def _insert_probs_sphere(self, origin, radius : float=rOH, n_grid : int=10) -> np.ndarray:
+    def _insert_probs_sphere(self, origin, radius : float, n_grid : int=10) -> np.ndarray:
         """ 
         Calculate the normalized Boltzmann probabilities associated with inserting a particle at each of the points on a spherical grid
         surrounding the origin point with the given radius
@@ -590,9 +595,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, rOH))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / rOH**2)
-        assert(np.allclose(hoh_bond_angle, aHOH))
+        assert(np.allclose(oh_bond_dist, self._rOH))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / self._rOH**2)
+        assert(np.allclose(hoh_bond_angle, self._aHOH))
         new_com = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_center_of_mass()
         assert(np.allclose(new_com, orig_com))
 
@@ -658,9 +663,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, rOH))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / rOH**2)
-        assert(np.allclose(hoh_bond_angle, aHOH))
+        assert(np.allclose(oh_bond_dist, self._rOH))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / self._rOH**2)
+        assert(np.allclose(hoh_bond_angle, self._aHOH))
 
         en_after, forces_after = self._evaluate_potential()
         exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
