@@ -134,6 +134,14 @@ def main():
     )
 
     parser.add_argument(
+        "--vibrational_stepsize",
+        type=float,
+        default=0.05,
+        required=False,
+        help="Width (in Angstroms) of the normal distribution from which vibrational moves will be sampled"
+    )
+
+    parser.add_argument(
         "--ngrid_O",
         type=int,
         default=10
@@ -159,7 +167,7 @@ def main():
     args = parser.parse_args()
 
     mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_DFT_data_path, args.H2O_structure_path, args.results_dir, 
-                                   args.temperature, args.translation_stepsize, args.rotation_stepsize,
+                                   args.temperature, args.translation_stepsize, args.rotation_stepsize, args.vibrational_stepsize,
                                    args.ngrid_O, args.ngrid_H1, args.ngrid_H2)
 
     if args.rng_seed is not None:

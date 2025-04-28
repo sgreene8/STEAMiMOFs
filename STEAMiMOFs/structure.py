@@ -21,7 +21,7 @@ class MOFWithAds:
     """
 
     def __init__(self, model_path : Path, MOF_path : Path, H2O_DFT_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
-                 temperature : float=298., trans_step : float=0.1, rot_step : float=45,
+                 temperature : float=298., trans_step : float=0.1, rot_step : float=45, vib_step=0.05,
                  ngrid_O : int=10, ngrid_H1 : int=10, ngrid_H2 : int=10):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(self._device.type))
@@ -87,6 +87,7 @@ class MOFWithAds:
         self.rot_step = abs(rot_step) / 180. * np.pi
         assert(self.rot_step < np.pi)
         self.trans_step = abs(trans_step)
+        self.vib_step = abs(vib_step)
         self.temperature = temperature
         self.volume = self._atoms.get_volume() # Angstroms^3
         self.rng = np.random.default_rng()
@@ -578,6 +579,8 @@ class MOFWithAds:
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
         orig_com = h2o.get_center_of_mass()
         orig_h2o_pos = h2o.get_positions()
+        orig_OH_bond_dist = np.linalg.norm(orig_h2o_pos[1:] - orig_h2o_pos[0], axis=1)
+        orig_HOH_bond_angle = np.arccos(np.dot(orig_h2o_pos[2] - orig_h2o_pos[0], orig_h2o_pos[1] - orig_h2o_pos[0]) / orig_OH_bond_dist[0] / orig_OH_bond_dist[1])
         orig_h2o_rel = orig_h2o_pos - orig_com
         new_h2o_rel = orig_h2o_rel
 
@@ -595,9 +598,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, self._rOH))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / self._rOH**2)
-        assert(np.allclose(hoh_bond_angle, self._aHOH))
+        assert(np.allclose(oh_bond_dist, orig_OH_bond_dist))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / oh_bond_dist[0] / oh_bond_dist[1])
+        assert(np.allclose(hoh_bond_angle, orig_HOH_bond_angle))
         new_com = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_center_of_mass()
         assert(np.allclose(new_com, orig_com))
 
@@ -646,6 +649,8 @@ class MOFWithAds:
         h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
         orig_com = h2o.get_center_of_mass()
         orig_h2o_pos = h2o.get_positions()
+        orig_OH_bond_dist = np.linalg.norm(orig_h2o_pos[1:] - orig_h2o_pos[0], axis=1)
+        orig_HOH_bond_angle = np.arccos(np.dot(orig_h2o_pos[2] - orig_h2o_pos[0], orig_h2o_pos[1] - orig_h2o_pos[0]) / orig_OH_bond_dist[0] / orig_OH_bond_dist[1])
 
         new_h2o_pos = orig_h2o_pos + trans_vector
         if sampling=="MALA":
@@ -663,9 +668,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, self._rOH))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / self._rOH**2)
-        assert(np.allclose(hoh_bond_angle, self._aHOH))
+        assert(np.allclose(oh_bond_dist, orig_OH_bond_dist))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / oh_bond_dist[0] / oh_bond_dist[1])
+        assert(np.allclose(hoh_bond_angle, orig_HOH_bond_angle))
 
         en_after, forces_after = self._evaluate_potential()
         exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
@@ -678,6 +683,57 @@ class MOFWithAds:
             # old_prob = np.exp(-np.linalg.norm(new_trans_vector)**2 / 2 / self.trans_step**2)  # Prob. of sampling orig_h2o_pos given new_h2o_pos
             # proposal_ratio = old_prob / new_prob
             exp_argument += (-np.linalg.norm(new_trans_vector)**2 + np.linalg.norm(trans_vector)**2) / 2 / self.trans_step**2
+
+        acc_ratio = np.exp(exp_argument)
+        if self.rng.random(1) < acc_ratio: # move is accepted
+            self.current_potential_en = en_after
+            self._H2O_forces = forces_after
+            return True
+        else: # move is rejected
+            for atom_idx in range(3):
+                self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = orig_h2o_pos[atom_idx]
+            return False
+    
+    def vibrate_h2o(self, index : int=None, sampling : str="MALA") -> bool:
+        """
+        Changes the internal geometry of an h2o molecule in the cell by a random amount.
+        Arguments:
+            index: If None, an h2o molecule is chosen at random, otherwise the molecule at the specified index is chosen
+            sampling: Monte Carlo sampling scheme to use, either MALA (Metropolis-adjusted Langevin) or Metropolis
+        Returns:
+            True if the change was accepted according to Metropolis-Hastings criterion, False otherwise
+        """
+
+        if not(sampling == "MALA" or sampling == "Metropolis"):
+            raise ValueError("MOFWithAds.vibrate_h2o sampling argument must be either 'MALA' or 'Metropolis'")
+        
+        if index is None:
+            index = self.rng.integers(self.nh2o)
+        
+        h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
+        orig_h2o_pos = h2o.get_positions()
+        displ_vec = self.rng.standard_normal([3, 3]) * self.vib_step
+        new_h2o_pos = orig_h2o_pos + displ_vec
+
+        if sampling=="MALA":
+            orig_com_force = np.sum(self._H2O_forces[(3 * index):(3 * index + 3)], axis=0) # Force on center of mass
+            internal_force = self._H2O_forces[(3 * index):(3 * index + 3)] - orig_com_force
+            new_h2o_pos += self.vib_step**2 / 2 / kb / self.temperature * internal_force
+        
+        for atom_idx in range(3):
+            self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
+
+        en_after, forces_after = self._evaluate_potential()
+        exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
+
+        if sampling=="MALA":
+            new_com_force = np.sum(forces_after[(3 * index):(3 * index + 3)], axis=0)
+            new_internal_force = forces_after[(3 * index):(3 * index + 3)] - new_com_force
+            new_displ_vec = new_h2o_pos - orig_h2o_pos + self.vib_step**2 / 2 / kb / self.temperature * new_internal_force
+            # new_prob = np.exp(-np.linalg.norm(displ_vec)**2 / 2 / self.vib_step**2) # Prob. of sampling new_h2o_pos given orig_h2o_pos
+            # old_prob = np.exp(-np.linalg.norm(new_displ_vec)**2 / 2 / self.vib_step**2) # Prob. of sampling orig_h2o_pos given new_h2o_pos
+            # proposal_ratio = old_prob / new_prob
+            exp_argument += (-np.linalg.norm(new_displ_vec)**2 + np.linalg.norm(displ_vec)**2) / 2 / self.vib_step**2
 
         acc_ratio = np.exp(exp_argument)
         if self.rng.random(1) < acc_ratio: # move is accepted
