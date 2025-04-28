@@ -7,8 +7,13 @@ import pickle
 import nequip.scripts.deploy
 from nequip.data.transforms import TypeMapper
 from nequip.data import AtomicData, AtomicDataDict
+from typing import Union
 
 kb = 8.617333262e-5 # Boltzmann Constant, eV/K
+# rOH = 0.95720 # O-H distance should be 0.95720 angstroms for vdW-DF USPP
+# aHOH = 104.52 / 180 * np.pi # H-O-H angle should  be 104.52 degrees for vdW-DF USPP
+rOH = 0.97066 # O-H distance should be 0.95720 angstroms for vdW-DF PAW
+aHOH = 103.7427 / 180 * np.pi # H-O-H angle should be 103.7427 degrees for vdW-DF PAW
 
 class MOFWithAds:
     """
@@ -19,12 +24,23 @@ class MOFWithAds:
     """
 
     def __init__(self, model_path : Path, MOF_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
-                 temperature : float=298., h2o_energy : float=0., trans_step : float=0.1, rot_step : float=45):
+                 temperature : float=298., h2o_energy : float=0., trans_step : float=0.1, rot_step : float=45,
+                 ngrid_O : int=10, ngrid_H1 : int=10, ngrid_H2 : int=10):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print('Using device {}'.format(self._device.type))
 
         self._atoms = ase.io.read(MOF_path)
         self.n_MOF_atoms = len(self._atoms)
+
+        # eq (20), Rappé et al., J. Am. Chem. Soc. 1992, 114, 10024 (UFF)
+        LJ_distance = {'H': 2.886, 'O': 3.5, 'Zr': 3.124, 'C': 3.851} # Angstroms
+        LJ_energy = {'H': 0.044, 'O': 0.060, 'Zr': 0.069, 'C': 0.105} # kcal/mol
+        self._mof_LJ_eps = np.array([LJ_energy[atom.symbol] for atom in self._atoms]) * 0.043 # eV
+        self._mof_LJ_sigma = np.array([LJ_distance[atom.symbol] for atom in self._atoms])
+
+        self._ngrid_O = ngrid_O
+        self._ngrid_H1 = ngrid_H1
+        self._ngrid_H2 = ngrid_H2
 
         if H2O_path is not None:
             H2O_atoms = ase.io.read(H2O_path, index=-1)
@@ -109,9 +125,9 @@ class MOFWithAds:
             h2o = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)]
             h2o_pos = h2o.get_positions()
             oh_bond_dist = np.linalg.norm(h2o_pos[1:] - h2o_pos[0], axis=1)
-            assert(np.allclose(oh_bond_dist, 0.95720))
-            hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / 0.95720**2)
-            assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
+            assert(np.allclose(oh_bond_dist, rOH))
+            hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / rOH**2)
+            assert(np.allclose(hoh_bond_angle, aHOH))
 
     def insert_h2o(self, number : int=1, keep=True) -> float:
         """
@@ -150,11 +166,11 @@ class MOFWithAds:
         y_vecs = np.cross(OH_vectors, x_vecs)
 
         H2_angles = self.rng.random(number) * np.pi * 2
-        # H-O-H angle should  be 104.52 degrees
-        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(104.52 / 180 * np.pi) + np.cos(104.52 / 180 * np.pi) * OH_vectors
+        
+        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(aHOH) + np.cos(aHOH) * OH_vectors
         H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-        H2_vecs *= 0.95720
-        OH_vectors *= 0.95720 # O-H distance should be 0.95720 angstroms
+        H2_vecs *= rOH
+        OH_vectors *= rOH
 
         h2o_coords = np.zeros([number, 3, 3]) # O, H1, H2
         h2o_coords[:, 0] = O_cart_coords
@@ -165,15 +181,26 @@ class MOFWithAds:
         h2o_atoms = Atoms('OHH' * number, positions=h2o_coords)
         self._atoms += h2o_atoms
         self.nh2o += number
-
+        
+        """
+        acc_prob = np.zeros(number)
+        rosenbluth_wt = 1
+        for h2o_index in range(number):
+            h2o_coords, rosen = self._sample_insert_position(n_grid=20)
+            rosenbluth_wt *= rosen
+            h2o_atoms = Atoms('OHH', positions=h2o_coords)
+            self._atoms += h2o_atoms
+            self.nh2o += 1
+        """
         en_after, forces_after = self._evaluate_potential()
 
-        # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
+        # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013) * with modification for nonuniform probability
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
             * (1e-10)**3 # Angstroms to meters
             / 1.602e-19 # eV to J
             * 101325 # J/m^3 to atm
+            # * rosenbluth_wt
         )
         if keep:
             self.current_potential_en = en_after
@@ -183,28 +210,318 @@ class MOFWithAds:
             self.nh2o -= number
         return acc_prob
     
+    def insert_h2o_lowen(self, number : int=1, n_sample=5000):
+        for ins_idx in range(number):
+            cell = self._atoms.get_cell()
 
-    def remove_h2o(self, number : int=1, put_back=False) -> float:
+            O_frac_coords = self.rng.random((n_sample, 3))
+            O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
+
+            # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
+            OH_vectors = self.rng.standard_normal((n_sample, 3))
+            is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+            while (np.any(is_zero)):
+                num_zero = np.sum(is_zero)
+                new_vecs = self.rng.standard_normal(num_zero, 3)
+                OH_vectors[is_zero] = new_vecs
+                is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+            OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
+
+            arbitrary_vec = OH_vectors[0].copy()
+            arbitrary_vec[0] += 0.1
+            arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+            
+            # Make sure arbitrary_vec not parallel or antiparallel to any OH_vectors
+            while(np.any(np.abs(np.abs(np.einsum('nc,c->n', OH_vectors, arbitrary_vec)) - 1) < 1e-8)):
+                arbitrary_vec[1] += 0.1
+                arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+            x_vecs = np.cross(OH_vectors, arbitrary_vec)
+            x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
+            y_vecs = np.cross(OH_vectors, x_vecs)
+
+            H2_angles = self.rng.random(n_sample) * np.pi * 2
+            
+            H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(aHOH) + np.cos(aHOH) * OH_vectors
+            H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
+            H2_vecs *= rOH
+            OH_vectors *= rOH
+
+            h2o_coords = np.zeros([n_sample, 3, 3]) # O, H1, H2
+            h2o_coords[:, 0] = O_cart_coords
+            h2o_coords[:, 1] = O_cart_coords + OH_vectors
+            h2o_coords[:, 2] = O_cart_coords + H2_vecs
+
+            h2o_atoms = Atoms('OHH', positions=h2o_coords[0])
+            self._atoms += h2o_atoms
+            self.nh2o += 1
+            min_energy = np.inf
+            for sample_idx in range(n_sample):
+                for atom_idx in range(3):
+                    self._atoms[-3 + atom_idx].position = h2o_coords[sample_idx, atom_idx]
+                en_after, forces_after = self._evaluate_potential()
+                if en_after < min_energy:
+                    min_energy = en_after
+                    argmin_energy = sample_idx
+            for atom_idx in range(3):
+                self._atoms[-3 + atom_idx].position = h2o_coords[argmin_energy, atom_idx]
+            
+        en_after, forces_after = self._evaluate_potential()
+        self.current_potential_en = en_after
+        self._H2O_forces = forces_after
+
+    
+    def _sample_insert_position(self, n_grid : int=10):
+        offset = self.rng.random(3)
+        O_cart_pos, O_probs = self._insert_probs_grid(offset=offset, n_grid=self._ngrid_O)
+        O_idx = self._sample_multidimensional_array(O_probs)
+        O_cart_pos = O_cart_pos[O_idx]
+        rosen = np.sum(O_probs)
+
+        H1_cart_pos, H1_probs = self._insert_probs_sphere(O_cart_pos, n_grid=self._ngrid_H1)
+        H1_idx = self._sample_multidimensional_array(H1_probs)
+        H1_cart_pos = H1_cart_pos[H1_idx]
+        rosen *= np.sum(probs)
+
+        H2_cart_pos, H2_probs = self._insert_probs_ring(O_cart_pos, H1_cart_pos, n_grid=self._ngrid_H2)
+        H2_idx = self._sample_multidimensional_array(H2_probs)
+        H2_cart_pos = H2_cart_pos[H2_idx]
+        rosen *= np.sum(probs)
+
+        h2o_coords = np.array([O_cart_pos, H1_cart_pos, H2_cart_pos])
+        # total_probability = O_probs[O_idx] * H1_probs[H1_idx] * H2_probs[H2_idx] * self._ngrid_O**3 * self._ngrid_H1 * self._ngrid_H2
+        return h2o_coords, rosen
+    
+    def _backcalculate_insert_prob(self, cart_coords, n_grid : int=10):
+        """
+        Calculate the normalized Boltzmann probability associated with inserting a molecule at a specified position.
+        Arguments:
+            cart_coords: The Cartesian coordinates of the inserted molecule
+        """
+        cell = self._atoms.get_cell()
+        max_cell_len = np.max(np.linalg.norm(cell, axis=1))
+        frac_coords = self._atoms.cell.scaled_positions(cart_coords)
+        frac_coords[:, frac_coords[0] > 1.] -= 1
+        frac_coords[:, frac_coords[0] < 0.] += 1
+        cart_coords = self._atoms.cell.cartesian_positions(frac_coords)
+        offset = frac_coords[0] - np.round(frac_coords[0] * self._ngrid_O) / self._ngrid_O
+        O_cart_pos, O_probs = self._insert_probs_grid(n_grid=self._ngrid_O, offset=offset)
+        distances = np.linalg.norm(cart_coords[0] - O_cart_pos, axis=-1)
+        O_idx = np.argmin(distances)
+        O_idx = np.unravel_index(O_idx, distances.shape)
+        assert(distances[O_idx] < max_cell_len / self._ngrid_O)
+        O_cart_pos = O_cart_pos[O_idx]
+        rosen = np.sum(O_probs)
+
+        H1_cart_pos, H1_probs = self._insert_probs_sphere(cart_coords[0], n_grid=self._ngrid_H1)
+        distances = np.linalg.norm(cart_coords[1] - H1_cart_pos, axis=-1)
+        H1_idx = np.argmin(distances)
+        H1_idx = np.unravel_index(H1_idx, distances.shape)
+        assert(distances[H1_idx] < rOH * 2 * np.pi / self._ngrid_H1)
+        rosen *= np.sum(probs)
+
+        H2_cart_pos, H2_probs = self._insert_probs_ring(cart_coords[0], cart_coords[1], n_grid=self._ngrid_H2, rotation_origin=cart_coords[2])
+        distances = np.linalg.norm(cart_coords[2] - H2_cart_pos, axis=-1)
+        H2_idx = np.argmin(distances)
+        assert(H2_idx == 0) # because rotation_origin was provided as coordinates of H atom in _insert_probs_ring
+        assert(distances[H2_idx] < 0.1)
+        H2_cart_pos = H2_cart_pos[H2_idx]
+        rosen *= np.sum(probs)
+
+        # return O_probs[O_idx] * H1_probs[H1_idx] * H2_probs[H2_idx] * self._ngrid_O**3 * self._ngrid_H1 * self._ngrid_H2
+        return rosen
+
+    
+    def _insert_probs_ring(self, origin, satellite, radius : float=rOH, angle : float=aHOH, n_grid : int=10, rotation_origin=None):
+        """
+        Calculate the normalized Boltzmann probabilities associated with inserting a particle at each of the points on a 
+        ring at a certain radius from the origin with a certain bond angle with respect to the origin and satellite points
+        Arguments:
+            origin: The Cartesian coordinates of the central atom
+            satellite: The Cartesian coordinates of the existing atom already placed
+            radius: The distance from the origin that the new atom should be
+            angle: The target bond angle from satellite to origin to the new atom
+            n_grid: The number of grid points around the ring
+            rotation_origin: If provided, defines the zero angle of rotation on the ring. 
+        Returns:
+            The Cartesian coordinates and normalized Boltzmann probabilities for each point on the ring
+        """
+        cell = self._atoms.get_cell()
+    
+        bond_vector = satellite - origin
+        bond_vector /= np.linalg.norm(bond_vector)
+
+        if rotation_origin is None:
+            arbitrary_vec = bond_vector.copy()
+            arbitrary_vec[0] += 0.1
+            arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+
+            # Make sure arbitrary_vec not parallel to bond_vector
+            dprod = np.dot(bond_vector, arbitrary_vec)
+            if (abs(dprod - 1) < 1e-8):
+                arbitrary_vec[1] += 0.1
+                arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+                dprod = np.dot(bond_vector, arbitrary_vec)
+                assert(abs(dprod - 1) > 1e-8)
+            
+            x_vec = np.cross(bond_vector, arbitrary_vec)
+        else:
+            x_vec = rotation_origin - origin
+            x_vec -= np.dot(x_vec, bond_vector) * bond_vector
+        
+        x_vec /= np.linalg.norm(x_vec)
+        assert(np.dot(x_vec, bond_vector) < 1e-8)
+        y_vec = np.cross(bond_vector, x_vec)
+        assert(abs(np.linalg.norm(y_vec) - 1) < 1e-8)
+
+        angles = np.linspace(0, np.pi * 2, num=n_grid, endpoint=False)
+        new_vecs = (np.cos(angles)[:, np.newaxis] * x_vec + np.sin(angles)[:, np.newaxis] * y_vec) * np.sin(aHOH) + np.cos(aHOH) * bond_vector
+        assert(np.allclose(np.arccos(np.einsum('vc,c->v', new_vecs, bond_vector)), aHOH))
+        cart_coords = origin + new_vecs * rOH
+
+        frac_grid = np.linalg.solve(cell.T, cart_coords.T).T
+        probs = self._calc_LJ_Boltzmann_probs(frac_grid, 'H')
+        return cart_coords, probs
+    
+    def _insert_probs_sphere(self, origin, radius : float=rOH, n_grid : int=10) -> np.ndarray:
+        """ 
+        Calculate the normalized Boltzmann probabilities associated with inserting a particle at each of the points on a spherical grid
+        surrounding the origin point with the given radius
+        Arguments:
+            origin: The origin point in Cartesian coordinates
+            radius: The radius of the spherical surface on which to construct the grid
+            n_grid: The number of grid points along each of the 2 angular spherical coordinates
+        Returns:
+            The Cartesian coordinates and normalized Boltzmann probabilities for each point on the grid
+        """
+        cell = self._atoms.get_cell()
+
+        theta_grid = np.linspace(0, np.pi, num=n_grid, endpoint=False)
+        phi_grid = np.linspace(0, np.pi * 2, num=n_grid, endpoint=False)
+        sphere_grid = np.meshgrid(theta_grid, phi_grid)
+        # Jacobian = np.sin(sphere_grid[0] + np.pi / n_grid / 2)
+        sphere_grid[0].shape = -1
+        sphere_grid[1].shape = -1
+        # shape (3, n_grid**2)
+        cart_coords = origin[:, np.newaxis] + radius * np.array([np.sin(sphere_grid[0]) * np.cos(sphere_grid[1]), np.sin(sphere_grid[0]) * np.sin(sphere_grid[1]), np.cos(sphere_grid[0])])
+        frac_grid = np.linalg.solve(cell.T, cart_coords).T
+
+        probs = self._calc_LJ_Boltzmann_probs(frac_grid, 'H')
+        probs.shape = (n_grid, n_grid)
+        # probs *= Jacobian
+        # probs /= np.sum(probs)
+        cart_coords = cart_coords.T
+        cart_coords.shape = (n_grid, n_grid, 3)
+        assert(np.allclose(np.linalg.norm(cart_coords - origin, axis=-1), radius))
+        return cart_coords, probs
+
+    
+    def _insert_probs_grid(self, n_grid : int=10, offset=0) -> np.ndarray:
+        """
+        Calculate the normalized Boltzmann probabilities associated with inserting a particle at each of the points on a grid 
+            within the cell (rectilinear in fractional coordinates), according to a H-atom UFF LJ potential
+        Arguments:
+            n_grid: The number of grid points to use in each of the 3 dimensions
+            offset(scalar or 3-d array): A shift for the grid points in fractional coordinates
+        Returns:
+            The Cartesian coordinates and normalized Boltzmann probabilities for each point on the grid
+        """
+
+        frac_grid = np.mgrid[0:n_grid, 0:n_grid, 0:n_grid]
+        frac_grid.shape = (3, -1)
+        frac_grid = frac_grid.T
+        frac_grid = frac_grid * 1.0 / n_grid
+        frac_grid += offset
+        frac_grid[frac_grid < 0] += 1
+
+        probs = self._calc_LJ_Boltzmann_probs(frac_grid, 'O')
+        probs.shape = (n_grid, n_grid, n_grid)
+
+        cart_coords = np.einsum('vc,gv->gc', self._atoms.get_cell(), frac_grid)
+        cart_coords.shape = (n_grid, n_grid, n_grid, 3)
+        return cart_coords, probs
+
+    def _calc_LJ_Boltzmann_probs(self, frac_coords, atom_type):
+        """ 
+        Calculate the Boltzmann factors associated with inserting a particle at each of the points
+        in the input array
+        Arguments:
+            frac_coords: The fractional coordinates of each of the points, with shape (*, 3)
+        Returns:
+            The Boltzmann factors
+        """
+        cell = self._atoms.get_cell()
+
+        mof_frac_coords = self._atoms.get_scaled_positions()
+        differences = mof_frac_coords[:, np.newaxis] - frac_coords[np.newaxis, :]
+        differences -= np.round(differences) # PBC
+        cart_differences = np.einsum('vc,agv->agc', cell, differences)
+        # shape: (n_atoms, frac_coords.shape[0])
+        distances = np.linalg.norm(cart_differences, axis=-1)
+
+        O_charge = -0.834
+        H_charge = -O_charge / 2
+        O_dist = distances[(self.n_MOF_atoms + 0)::3]
+        H1_dist = distances[(self.n_MOF_atoms + 1)::3]
+        H2_dist = distances[(self.n_MOF_atoms + 2)::3]
+
+        if atom_type == 'O':
+            tip3p_eps = 595.0**2 / 4 / 582e3 * 0.043
+            tip3p_sigma = (2 * 582e3 / 595.0)**(1./6)
+            sigma_mix = 0.5 * (self._mof_LJ_sigma + tip3p_sigma)
+            eps_mix = (tip3p_eps * self._mof_LJ_eps)**0.5
+            mof_dist = distances[:self.n_MOF_atoms]
+            scaled_dist = sigma_mix[:, None] / mof_dist
+            lj_mof = np.sum(eps_mix[:, None] * (-2 * scaled_dist**6 + scaled_dist**12), axis=0)
+            lj_OO = np.sum(tip3p_eps * (-2 * (tip3p_sigma / O_dist)**6 + (tip3p_sigma / O_dist)**12), axis=0)
+            self_charge = O_charge
+        elif atom_type == 'H':
+            lj_mof = 0
+            lj_OO = 0
+            self_charge = H_charge
+
+        coulomb_h2o = 332.1 * 0.043 * self_charge * np.sum(O_charge / O_dist + H_charge /  H1_dist + H_charge /  H2_dist, axis=0)
+        overlap = coulomb_h2o < -(50 * kb * self.temperature) # detect overlaps; np.exp blows up at 100
+        coulomb_h2o[overlap] = 1e20
+
+        total_energy = lj_mof + lj_OO + coulomb_h2o
+        boltzmann = np.exp(-total_energy / self.temperature / kb)
+        # if normalize:
+        #     boltzmann /= np.sum(boltzmann)
+        return boltzmann
+    
+    def _sample_multidimensional_array(self, arr):
+        cs = np.cumsum(arr)
+        rand_num = self.rng.random() # [0, 1)
+        sampled_idx = np.sum(cs < rand_num)
+        return np.unravel_index(sampled_idx, arr.shape)
+
+    def remove_h2o(self, number : int=1, put_back=False, index : Union[int, list[int]]=None) -> float:
         """
         Remove randomly selected molecules from the simulation cell
         Arguments:
             number: The number of H2O molecules (not atoms) to remove
             put_back: If true, the deleted molecules will be returned to the simulation cell upon return (as for the NVT+W) method
+            index: If none, indices will be selected randomly. Otherwise, molecules at the specified indices will be removed.
         Returns:
             The NVT+W probability divided by the fugacity for the deletion.
         """
-        remove_idx = self.rng.choice(self.nh2o, number)
+        if index is None:
+            remove_idx = self.rng.choice(self.nh2o, number)
+        else:
+            remove_idx = np.array(index)
         atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1) + self.n_MOF_atoms
         original_atoms = self._atoms.copy()
         del self._atoms[atom_idx]
         en_after, forces_after = self._evaluate_potential()
 
+        # rosenbluth_wt = self._backcalculate_insert_prob(original_atoms[atom_idx].get_positions(), n_grid=20)
         # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
         acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
             / (1e-10)**3 # Angstroms to meters
             * 1.602e-19 # eV to J
             / 101325 # J/m^3 to atm
+            # / rosenbluth_wt
         )
         if put_back:
             self._atoms = original_atoms
@@ -213,6 +530,22 @@ class MOFWithAds:
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
         return acc_prob
+    
+
+    def eval_H2O_energies(self) -> np.ndarray:
+        """
+        Evaluate the energy required to remove each H2O molecule in the simulation cell, for debugging purposes
+        Returns:
+            The energy of each H2O molecule in the simulation cell
+        """
+        energies = np.zeros(self.nh2o)
+        original_atoms = self._atoms.copy()
+        for idx in range(self.nh2o):
+            del self._atoms[idx]
+            en_after, _ = self._evaluate_potential()
+            energies[idx] = en_after - self.current_potential_en + self._free_H2O_en
+            self._atoms = original_atoms.copy()
+        return energies
     
     def rotate_h2o(self, index : int=-1, sampling : str="MALA") -> bool:
         """
@@ -257,9 +590,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, 0.95720))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
-        assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
+        assert(np.allclose(oh_bond_dist, rOH))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / rOH**2)
+        assert(np.allclose(hoh_bond_angle, aHOH))
         new_com = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_center_of_mass()
         assert(np.allclose(new_com, orig_com))
 
@@ -325,9 +658,9 @@ class MOFWithAds:
 
         # Make sure internal geometry is preserved
         oh_bond_dist = np.linalg.norm(new_h2o_pos[1:] - new_h2o_pos[0], axis=1)
-        assert(np.allclose(oh_bond_dist, 0.95720))
-        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / 0.95720**2)
-        assert(np.allclose(hoh_bond_angle, 104.52 / 180 * np.pi))
+        assert(np.allclose(oh_bond_dist, rOH))
+        hoh_bond_angle = np.arccos(np.dot(new_h2o_pos[2] - new_h2o_pos[0], new_h2o_pos[1] - new_h2o_pos[0]) / rOH**2)
+        assert(np.allclose(hoh_bond_angle, aHOH))
 
         en_after, forces_after = self._evaluate_potential()
         exp_argument = -(en_after - self.current_potential_en) / self.temperature / kb # numerically more stable to calculate exp(a+b) than exp(a) exp(b)
@@ -371,12 +704,18 @@ class MOFWithAds:
         with open(fname, 'wb') as f:
             pickle.dump(self.rng.bit_generator.state, f, pickle.HIGHEST_PROTOCOL)
     
-    def load_rng_state(self, fname : str):
+    def seed_rng_state(self, state : Union[str, int]):
         """
-        Loads the state of the random number generator from a file
+        If state is a Path, loads the state of the random number generator from that path.
+        If state is an int, seeds the random number generator with that int
         """
-        with open(fname, 'rb') as f:
-            self.rng.bit_generator.state = pickle.load(f)
+        if isinstance(state, str):
+            with open(fname, 'rb') as f:
+                self.rng.bit_generator.state = pickle.load(f)
+        elif isinstance(state, int):
+            self.rng = np.random.default_rng(state)
+        else:
+            raise ValueError('Incorrect argument type')
 
 
 def _calc_rot_angle(pos1, pos2) -> float:
@@ -394,7 +733,9 @@ def _calc_rot_angle(pos1, pos2) -> float:
     rel2 = pos2 - com2
 
     ghost1 = np.cross(rel1[1], rel1[2])
+    ghost1 /= np.linalg.norm(ghost1)
     ghost2 = np.cross(rel2[1], rel2[2])
+    ghost2 /= np.linalg.norm(ghost2)
     rel1[0] = ghost1
     rel2[0] = ghost2
 

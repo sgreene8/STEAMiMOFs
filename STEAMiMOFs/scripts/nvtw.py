@@ -103,9 +103,9 @@ def main():
     )
 
     parser.add_argument(
-        "--rng_state_path",
-        help="Path to a file containing the state of the random number generator to initialize the calculation. Useful for debugging purposes.",
-        type=Path,
+        "--rng_seed",
+        help="Seed for the random number generator, can be either a path to a file containing the state of the random number generator, or an integer. Useful for debugging purposes.",
+        type=str,
         default=None,
         required=False
     )
@@ -132,6 +132,24 @@ def main():
         required=False,
         help="Width (in degrees) of the normal distribution from which rotation moves will be sampled"
     )
+
+    parser.add_argument(
+        "--ngrid_O",
+        type=int,
+        default=10
+    )
+
+    parser.add_argument(
+        "--ngrid_H1",
+        type=int,
+        default=10
+    )
+
+    parser.add_argument(
+        "--ngrid_H2",
+        type=int,
+        default=10
+    )
     
 
     if len(sys.argv) == 1:
@@ -141,10 +159,15 @@ def main():
     args = parser.parse_args()
 
     mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_structure_path, args.results_dir, 
-                                   args.temperature, args.H2O_energy, args.translation_stepsize, args.rotation_stepsize)
+                                   args.temperature, args.H2O_energy, args.translation_stepsize, args.rotation_stepsize,
+                                   args.ngrid_O, args.ngrid_H1, args.ngrid_H2)
 
-    if args.rng_state_path is not None:
-        mof_ads.load_rng_state(args.rng_state_path)
+    if args.rng_seed is not None:
+        try:
+            seed = int(args.rng_seed)
+        except:
+            seed = args.rng_seed
+        mof_ads.seed_rng_state(seed)
 
     # Normalize probabilities
     tot_probability = args.translate_probability + args.rotate_probability + args.nvtw_insert_probability + args.nvtw_remove_probability
@@ -162,7 +185,8 @@ def main():
     num_rot_attempted = 0
 
     if args.num_h2o > 0:
-        mof_ads.insert_h2o(args.num_h2o)
+        mof_ads.insert_h2o_lowen(args.num_h2o)
+        mof_ads.check_h2o_geom()
 
     # Create output file handles
     if nvtw_ins_prob > 0:
