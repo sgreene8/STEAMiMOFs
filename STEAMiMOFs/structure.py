@@ -1,6 +1,7 @@
 from pathlib import Path
 import torch
 import ase.io
+import ase.geometry
 from ase import Atoms
 import numpy as np
 import pickle
@@ -20,7 +21,7 @@ class MOFWithAds:
 
     """
 
-    def __init__(self, model_path : Path, MOF_path : Path, H2O_DFT_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
+    def __init__(self, model_paths : dict, MOF_path : Path, H2O_DFT_path : Path, H2O_path : Path=None, results_path : Path=Path('.'), 
                  temperature : float=298., trans_step : float=0.1, rot_step : float=45, vib_step=0.05,
                  ngrid_O : int=10, ngrid_H1 : int=10, ngrid_H2 : int=10):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,17 +48,32 @@ class MOFWithAds:
         else:
             self.nh2o = 0
         
-        if model_path is None:
-            self._model = None
+        if model_paths is None:
+            self._models = None
         else:
-            # Setup potential
-            # Code adapted from nequip.ase.nequip_calculator
-            self._model, metadata = nequip.scripts.deploy.load_deployed_model(
-                                model_path=model_path,
-                                device=self._device,
-                                set_global_options="warn",
-                            )
-            self._r_max = float(metadata[nequip.scripts.deploy.R_MAX_KEY])
+            # Set up potentials
+            r_max = 0
+            tmp_models = []
+            n_models = len(model_paths.keys())
+            model_ranges = np.zeros([n_models, 2])
+            for idx, path in enumerate(model_paths.keys()):
+                model_ranges[idx] = model_paths[path]
+               # Code adapted from nequip.ase.nequip_calculator
+                this_model, metadata = nequip.scripts.deploy.load_deployed_model(
+                                        model_path=path,
+                                        device=self._device,
+                                        set_global_options="warn",
+                                )
+                this_r_max = float(metadata[nequip.scripts.deploy.R_MAX_KEY])
+                r_max = this_r_max
+                # TO-DO: assert consistency in r_max across models
+                tmp_models.append(this_model)
+            
+            # TO-DO: assert disjoint model ranges 
+            self._r_max = r_max
+            self._models = tmp_models
+            self._model_ranges = model_ranges
+            
             # build typemapper
             species_to_type_name = {
                         "H" : "H",
@@ -80,7 +96,8 @@ class MOFWithAds:
         else:
             with open(H2O_DFT_path, 'rb') as file:
                 h2o_data = yaml.safe_load(file)
-                self._free_H2O_en = h2o_data['DFT_energy']
+                self._free_H2O_en = float(h2o_data['H2O_energy'])
+                self._empty_MOF_en = float(h2o_data['MOF_energy']) # TO-DO: fold this into NNP argument
                 self._rOH = h2o_data['rOH']
                 self._aHOH = h2o_data['aHOH'] / 180. * np.pi
         
@@ -98,12 +115,20 @@ class MOFWithAds:
         self._traj_file = open(results_path / 'traj.xyz', 'a')
     
     def _evaluate_potential(self):
-        if self._model is not None:
+        if self.nh2o == 0:
+            energy = self._empty_MOF_en
+            forces = np.zeros([0, 3])
+        elif self._models is not None:
+            model_idx = (self._model_ranges[:, 0] <= self.nh2o) and (self._model_ranges[:, 1] >= self.nh2o)
+            model_idx = np.nonzero(model_idx)[0]
+            assert(model_idx.shape[0] == 1)
+            model_idx = model_idx[0]
+
             data = AtomicData.from_ase(atoms=self._atoms, r_max=self._r_max)
             data = self._transform(data)
             data = data.to(self._device)
             data = AtomicData.to_AtomicDataDict(data)
-            out = self._model(data)
+            out = self._models[model_idx](data)
             energy = out[AtomicDataDict.TOTAL_ENERGY_KEY][0, 0].detach().cpu().numpy()
             forces = out[AtomicDataDict.FORCE_KEY][self.n_MOF_atoms:].detach().cpu().numpy()
         else:
@@ -133,31 +158,51 @@ class MOFWithAds:
             oh_bond_dist = np.linalg.norm(h2o_pos[1:] - h2o_pos[0], axis=1)
             assert(np.allclose(oh_bond_dist, self._rOH))
             hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / self._rOH**2)
-            assert(np.allclose(hoh_bond_angle, aHOH))
+            assert(np.allclose(hoh_bond_angle, self._aHOH))
 
-    def insert_h2o(self, number : int=1, keep=True) -> float:
+    def insert_h2o(self, number : int=1, keep=True, exclusion_radius=1.0) -> float:
         """
         Insert H2O molecules with random position and orientation in the simulation cell
         Arguments:
             number: The number of H2O molecules (not atoms) to insert
             keep: Whether the inserted molecules should remain in the simulation cell upon return, or whether they should be deleted (as for the NVT+W method)
+            exclusion_radius: Insertions that place atoms within this distance of other atoms will be rejected and re-tried
         Returns:
             The NVT+W probability divided by the fugacity for the insertion.
         """
         cell = self._atoms.get_cell()
 
-        O_frac_coords = self.rng.random((number, 3))
-        O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
+        n_success = 0
+        O_cart_coords_keep = np.zeros([n_success, 3])
+        while (n_success < number):
+            O_frac_coords = self.rng.random((number * 2, 3))
+            O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
+            _, distances = ase.geometry.get_distances(O_cart_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
+            keep_bool = distances > exclusion_radius
+            keep_coords = O_cart_coords[keep_bool][:(number - n_success)]
+            n_success += keep_coords.shape[0]
+            O_cart_coords_keep = np.append(O_cart_coords_keep, keep_coords, axis=0)
+        O_cart_coords = O_cart_coords_keep
 
         # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
-        OH_vectors = self.rng.standard_normal((number, 3))
-        is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-        while (np.any(is_zero)):
-            num_zero = np.sum(is_zero)
-            new_vecs = self.rng.standard_normal(num_zero, 3)
-            OH_vectors[is_zero] = new_vecs
+        n_success = 0
+        OH_vectors_keep = np.zeros([n_success, 3])
+        while (n_success < number):
+            OH_vectors = self.rng.standard_normal((number * 2, 3))
             is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-        OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
+            while (np.any(is_zero)):
+                num_zero = np.sum(is_zero)
+                new_vecs = self.rng.standard_normal(num_zero, 3)
+                OH_vectors[is_zero] = new_vecs
+                is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+            OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
+            H_coords = O_cart_coords + self._rOH * OH_vectors
+            _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
+            keep_bool = distances > exclusion_radius
+            keep_vecs = OH_vectors[keep_bool][:(number - n_success)]
+            n_success += keep_vecs.shape[0]
+            OH_vectors_keep = np.append(OH_vectors_keep, keep_vecs, axis=0)
+        OH_vectors = OH_vectors_keep
 
         arbitrary_vec = OH_vectors[0].copy()
         arbitrary_vec[0] += 0.1
@@ -171,11 +216,23 @@ class MOFWithAds:
         x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
         y_vecs = np.cross(OH_vectors, x_vecs)
 
-        H2_angles = self.rng.random(number) * np.pi * 2
+        n_success = 0
+        H2_vecs_keep = np.zeros([n_success, 3])
+        while (n_success < number):
+            H2_angles = self.rng.random(number * 2) * np.pi * 2
         
-        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
-        H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-        H2_vecs *= self._rOH
+            H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
+            H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
+            H2_vecs *= self._rOH
+
+            H_coords = O_cart_coords + H2_vecs
+            _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
+            keep_bool = distances > exclusion_radius
+            keep_vecs = H2_vecs[keep_bool][:(number - n_success)]
+            n_success += keep_vecs.shape[0]
+            H2_vecs_keep = np.append(H2_vecs_keep, keep_vecs, axis=0)
+        H2_vecs = H2_vecs_keep
+
         OH_vectors *= self._rOH
 
         h2o_coords = np.zeros([number, 3, 3]) # O, H1, H2
@@ -216,7 +273,7 @@ class MOFWithAds:
             self.nh2o -= number
         return acc_prob
     
-    def insert_h2o_lowen(self, number : int=1, n_sample=5000):
+    def insert_h2o_lowen(self, number : int=1, n_sample=500, exclusion_radius=1.0):
         for ins_idx in range(number):
             cell = self._atoms.get_cell()
 
@@ -257,11 +314,19 @@ class MOFWithAds:
             h2o_coords[:, 1] = O_cart_coords + OH_vectors
             h2o_coords[:, 2] = O_cart_coords + H2_vecs
 
+            h2o_coords.shape = (n_sample * 3, 3)
+            _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
+            h2o_coords.shape = (n_sample, 3, 3)
+            distances.shape = (n_sample, 3, self.n_MOF_atoms)
+            keep = np.all(distances > exclusion_radius, axis=(1, 2))
+            h2o_coords = h2o_coords[keep]
+            n_keep = h2o_coords.shape[0]
+
             h2o_atoms = Atoms('OHH', positions=h2o_coords[0])
             self._atoms += h2o_atoms
             self.nh2o += 1
             min_energy = np.inf
-            for sample_idx in range(n_sample):
+            for sample_idx in range(n_keep):
                 for atom_idx in range(3):
                     self._atoms[-3 + atom_idx].position = h2o_coords[sample_idx, atom_idx]
                 en_after, forces_after = self._evaluate_potential()

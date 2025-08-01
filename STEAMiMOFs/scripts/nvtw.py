@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import sys
+import json
 from STEAMiMOFs import structure
 
 def main():
@@ -8,9 +9,10 @@ def main():
         description="Perform a NVT+W simulation to determine the thermodynamic properties of a MOF at a target temperature and loading.")
 
     parser.add_argument(
-        "--NNP_path",
-        help="Path to a deployed Allegro neural network potential",
-        type=Path,
+        "--NNP_paths",
+        help="JSON string representing a dictionary whose keys represent paths to deployed Allegro neural network potentials and whose " +
+             "values are lists containing the min and max number of adsorbate molecules to which the potential can be applied",
+        type=json.loads,
         default=None,
         required=True
     )
@@ -166,7 +168,7 @@ def main():
     
     args = parser.parse_args()
 
-    mof_ads = structure.MOFWithAds(args.NNP_path, args.MOF_structure_path, args.H2O_DFT_data_path, args.H2O_structure_path, args.results_dir, 
+    mof_ads = structure.MOFWithAds(args.NNP_paths, args.MOF_structure_path, args.H2O_DFT_data_path, args.H2O_structure_path, args.results_dir, 
                                    args.temperature, args.translation_stepsize, args.rotation_stepsize, args.vibrational_stepsize,
                                    args.ngrid_O, args.ngrid_H1, args.ngrid_H2)
 
