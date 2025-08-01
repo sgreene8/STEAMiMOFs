@@ -101,6 +101,15 @@ class MOFWithAds:
                 self._rOH = h2o_data['rOH']
                 self._aHOH = h2o_data['aHOH'] / 180. * np.pi
         
+        if (self.nh2o > 0):
+            print('Correcting input geometry')
+        for index in range(self.nh2o):
+            orig_geom = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_positions()
+            new_geom = correct_H2O_geom(orig_geom, self._rOH, self._aHOH)
+            for atom_idx in range(3):
+                self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_geom[atom_idx]
+        self.check_h2o_geom()
+
         self.rot_step = abs(rot_step) / 180. * np.pi
         assert(self.rot_step < np.pi)
         self.trans_step = abs(trans_step)
@@ -113,6 +122,7 @@ class MOFWithAds:
         assert(self._H2O_forces.shape[1] == 3)
 
         self._traj_file = open(results_path / 'traj.xyz', 'a')
+        
     
     def _evaluate_potential(self):
         if self.nh2o == 0:
@@ -884,3 +894,56 @@ def _calc_rot_matrix(angle: float, axis):
         [2 * (q[2] * q[1] + q[0] * q[3]), q[0]**2 - q[1]**2 + q[2]**2 - q[3]**2, 2 * (q[2] * q[3] - q[0] * q[1])],
         [2 * (q[3] * q[1] - q[0] * q[2]), 2 * (q[3] * q[2] + q[0] * q[1]), q[0]**2 - q[1]**2 - q[2]**2 + q[3]**2]
     ])
+
+def correct_H2O_geom(geom: np.ndarray, rOH: float, aHOH: float) -> np.ndarray:
+    """
+    Adjust a H2O molecule's geometry to have the correct bond distances and angles
+    geom: The input geometry, shape (3, 3), order OHH
+    rOH: The target O-H bond distance in the output
+    aHOH: The target H-O-H angle (radians) in the output
+    """
+    O_pos = geom[0]
+    OH_vector = geom[1] - O_pos
+    OH_vector /= np.linalg.norm(OH_vector)
+
+    arbitrary_vec = OH_vector.copy()
+    arbitrary_vec[0] += 0.1
+    arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+
+    # Make sure arbitrary_vec not parallel or antiparallel to OH_vector
+    while (np.linalg.norm(np.cross(OH_vector, arbitrary_vec)) < 1e-8):
+        arbitrary_vec[1] += 0.1
+        arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+
+    x_vecs = np.cross(OH_vector, arbitrary_vec)
+    x_vecs /= np.linalg.norm(x_vecs)
+    y_vecs = np.cross(OH_vector, x_vecs)
+
+    OH2_orig = geom[2] - O_pos
+    x_proj = np.dot(x_vecs, OH2_orig)
+    y_proj = np.dot(y_vecs, OH2_orig)
+
+    H2_angle = np.arctan2(y_proj, x_proj)
+    H2_vec = (np.cos(H2_angle) * x_vecs + np.sin(H2_angle) * y_vecs) * np.sin(aHOH) + np.cos(aHOH) * OH_vector
+    H2_vec *= rOH
+    OH_vector *= rOH
+
+    H2O_cart_coords = np.array([O_pos, O_pos + OH_vector, O_pos + H2_vec])
+
+    # Check OH1 distance
+    new_OH1 = H2O_cart_coords[0] - H2O_cart_coords[1]
+    new_OH1_dist = np.linalg.norm(new_OH1)
+    assert(abs(new_OH1_dist - rOH) < 1e-8)
+
+    # Check OH2 distance
+    new_OH2 = H2O_cart_coords[0] - H2O_cart_coords[2]
+    new_OH2_dist = np.linalg.norm(new_OH2)
+    assert(abs(new_OH2_dist - rOH) < 1e-8)
+
+    # Check HOH angle
+    new_OH1 /= new_OH1_dist
+    new_OH2 /= new_OH2_dist
+    new_aHOH = np.arccos(np.dot(new_OH1, new_OH2))
+    assert(abs(new_aHOH - aHOH) < 1e-8)
+
+    return H2O_cart_coords
