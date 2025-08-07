@@ -188,7 +188,7 @@ class MOFWithAds:
             O_frac_coords = self.rng.random((number * 2, 3))
             O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
             _, distances = ase.geometry.get_distances(O_cart_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = distances > exclusion_radius
+            keep_bool = np.all(distances > exclusion_radius, axis=1)
             keep_coords = O_cart_coords[keep_bool][:(number - n_success)]
             n_success += keep_coords.shape[0]
             O_cart_coords_keep = np.append(O_cart_coords_keep, keep_coords, axis=0)
@@ -208,7 +208,7 @@ class MOFWithAds:
             OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
             H_coords = O_cart_coords + self._rOH * OH_vectors
             _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = distances > exclusion_radius
+            keep_bool = np.all(distances > exclusion_radius, axis=1)
             keep_vecs = OH_vectors[keep_bool][:(number - n_success)]
             n_success += keep_vecs.shape[0]
             OH_vectors_keep = np.append(OH_vectors_keep, keep_vecs, axis=0)
@@ -237,7 +237,7 @@ class MOFWithAds:
 
             H_coords = O_cart_coords + H2_vecs
             _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = distances > exclusion_radius
+            keep_bool = np.all(distances > exclusion_radius, axis=1)
             keep_vecs = H2_vecs[keep_bool][:(number - n_success)]
             n_success += keep_vecs.shape[0]
             H2_vecs_keep = np.append(H2_vecs_keep, keep_vecs, axis=0)
