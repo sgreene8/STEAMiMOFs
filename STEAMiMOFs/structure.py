@@ -103,6 +103,8 @@ class MOFWithAds:
         
         if (self.nh2o > 0):
             print('Correcting input geometry')
+            initial_en, _ = self._evaluate_potential()
+            print('Energy before correction: ', initial_en)
         for index in range(self.nh2o):
             orig_geom = self._atoms[(self.n_MOF_atoms + 3 * index):(self.n_MOF_atoms + 3 * index + 3)].get_positions()
             new_geom = correct_H2O_geom(orig_geom, self._rOH, self._aHOH)
