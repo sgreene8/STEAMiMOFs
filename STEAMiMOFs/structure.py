@@ -80,6 +80,7 @@ class MOFWithAds:
                         "C" : "C",
                         "O" : "O",
                         "Zr" : "Zr",
+                        "Mg" : "Mg",
                     }
             type_names = metadata[nequip.scripts.deploy.TYPE_NAMES_KEY].split(" ")
             type_name_to_index = {n: i for i, n in enumerate(type_names)}
@@ -131,7 +132,7 @@ class MOFWithAds:
             energy = self._empty_MOF_en
             forces = np.zeros([0, 3])
         elif self._models is not None:
-            model_idx = (self._model_ranges[:, 0] <= self.nh2o) and (self._model_ranges[:, 1] >= self.nh2o)
+            model_idx = np.logical_and(self._model_ranges[:, 0] <= self.nh2o, self._model_ranges[:, 1] >= self.nh2o)
             model_idx = np.nonzero(model_idx)[0]
             assert(model_idx.shape[0] == 1)
             model_idx = model_idx[0]
@@ -171,6 +172,70 @@ class MOFWithAds:
             assert(np.allclose(oh_bond_dist, self._rOH))
             hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / self._rOH**2)
             assert(np.allclose(hoh_bond_angle, self._aHOH))
+    
+    def generate_trial_positions(self, number : int, exclusion_radius=1.0):
+
+        positions = np.zeros([number, 3])
+        energies = np.zeros(number)
+        cell = self._atoms.get_cell()
+        O_frac_coords = self.rng.random((number, 3))
+        O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
+
+        # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
+        OH_vectors = self.rng.standard_normal((number, 3))
+        is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+        while (np.any(is_zero)):
+            num_zero = np.sum(is_zero)
+            new_vecs = self.rng.standard_normal(num_zero, 3)
+            OH_vectors[is_zero] = new_vecs
+            is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+        OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
+
+        arbitrary_vec = OH_vectors[0].copy()
+        arbitrary_vec[0] += 0.1
+        arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+
+        # Make sure arbitrary_vec not parallel or antiparallel to any OH_vectors
+        while(np.any(np.abs(np.abs(np.einsum('nc,c->n', OH_vectors, arbitrary_vec)) - 1) < 1e-8)):
+            arbitrary_vec[1] += 0.1
+            arbitrary_vec /= np.linalg.norm(arbitrary_vec)
+        x_vecs = np.cross(OH_vectors, arbitrary_vec)
+        x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
+        y_vecs = np.cross(OH_vectors, x_vecs)
+
+        H2_angles = self.rng.random(number) * np.pi * 2
+    
+        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
+        H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
+        H2_vecs *= self._rOH
+
+        OH_vectors *= self._rOH
+
+        h2o_coords = np.zeros([number, 3, 3]) # O, H1, H2
+        h2o_coords[:, 0] = O_cart_coords
+        h2o_coords[:, 1] = O_cart_coords + OH_vectors
+        h2o_coords[:, 2] = O_cart_coords + H2_vecs
+        h2o_coords.shape = (number * 3, 3)
+
+        _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.get_positions(), cell=cell, pbc=self._atoms.pbc)
+        distances.shape = (number, 3, -1)
+        too_close = np.any(distances < exclusion_radius, axis=(1, 2))
+        energies[too_close] = np.inf
+        h2o_coords.shape = (number, 3, 3)
+
+        self.nh2o += 1
+        h2o_atoms = Atoms('OHH', positions=h2o_coords[0])
+        self._atoms += h2o_atoms
+        for idx in range(number):
+            if (not too_close[idx]):
+                for atom_idx in range(3):
+                    self._atoms[-3 + atom_idx].position = h2o_coords[idx, atom_idx]
+                energies[idx], _ = self._evaluate_potential()
+        del self._atoms[-3:]
+        self.nh2o -= 1
+
+        return positions, energies
+
 
     def insert_h2o(self, number : int=1, keep=True, exclusion_radius=1.0) -> float:
         """
@@ -182,39 +247,22 @@ class MOFWithAds:
         Returns:
             The NVT+W probability divided by the fugacity for the insertion.
         """
+
+        """
         cell = self._atoms.get_cell()
 
-        n_success = 0
-        O_cart_coords_keep = np.zeros([n_success, 3])
-        while (n_success < number):
-            O_frac_coords = self.rng.random((number * 2, 3))
-            O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
-            _, distances = ase.geometry.get_distances(O_cart_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = np.all(distances > exclusion_radius, axis=1)
-            keep_coords = O_cart_coords[keep_bool][:(number - n_success)]
-            n_success += keep_coords.shape[0]
-            O_cart_coords_keep = np.append(O_cart_coords_keep, keep_coords, axis=0)
-        O_cart_coords = O_cart_coords_keep
+        O_frac_coords = self.rng.random((number, 3))
+        O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
 
         # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
-        n_success = 0
-        OH_vectors_keep = np.zeros([n_success, 3])
-        while (n_success < number):
-            OH_vectors = self.rng.standard_normal((number * 2, 3))
+        OH_vectors = self.rng.standard_normal((number, 3))
+        is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
+        while (np.any(is_zero)):
+            num_zero = np.sum(is_zero)
+            new_vecs = self.rng.standard_normal(num_zero, 3)
+            OH_vectors[is_zero] = new_vecs
             is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-            while (np.any(is_zero)):
-                num_zero = np.sum(is_zero)
-                new_vecs = self.rng.standard_normal(num_zero, 3)
-                OH_vectors[is_zero] = new_vecs
-                is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-            OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
-            H_coords = O_cart_coords + self._rOH * OH_vectors
-            _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = np.all(distances > exclusion_radius, axis=1)
-            keep_vecs = OH_vectors[keep_bool][:(number - n_success)]
-            n_success += keep_vecs.shape[0]
-            OH_vectors_keep = np.append(OH_vectors_keep, keep_vecs, axis=0)
-        OH_vectors = OH_vectors_keep
+        OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
 
         arbitrary_vec = OH_vectors[0].copy()
         arbitrary_vec[0] += 0.1
@@ -228,22 +276,11 @@ class MOFWithAds:
         x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
         y_vecs = np.cross(OH_vectors, x_vecs)
 
-        n_success = 0
-        H2_vecs_keep = np.zeros([n_success, 3])
-        while (n_success < number):
-            H2_angles = self.rng.random(number * 2) * np.pi * 2
-        
-            H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
-            H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-            H2_vecs *= self._rOH
-
-            H_coords = O_cart_coords + H2_vecs
-            _, distances = ase.geometry.get_distances(H_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
-            keep_bool = np.all(distances > exclusion_radius, axis=1)
-            keep_vecs = H2_vecs[keep_bool][:(number - n_success)]
-            n_success += keep_vecs.shape[0]
-            H2_vecs_keep = np.append(H2_vecs_keep, keep_vecs, axis=0)
-        H2_vecs = H2_vecs_keep
+        H2_angles = self.rng.random(number) * np.pi * 2
+    
+        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
+        H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
+        H2_vecs *= self._rOH
 
         OH_vectors *= self._rOH
 
@@ -253,31 +290,47 @@ class MOFWithAds:
         h2o_coords[:, 2] = O_cart_coords + H2_vecs
         h2o_coords.shape = (number * 3, 3)
 
+        _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.get_positions(), cell=cell, pbc=self._atoms.pbc)
+
         h2o_atoms = Atoms('OHH' * number, positions=h2o_coords)
         self._atoms += h2o_atoms
         self.nh2o += number
         
+        if np.any(distances < exclusion_radius):
+            acc_prob = 0
+            if keep:
+                en_after, forces_after = self._evaluate_potential()
+        else:
+            en_after, forces_after = self._evaluate_potential()
+
+            # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013) * with modification for nonuniform probability
+            # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
+            acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
+                * (1e-10)**3 # Angstroms to meters
+                / 1.602e-19 # eV to J
+                * 101325 # J/m^3 to atm
+                * 8 * np.pi**2 # for rigid triatomic molecules
+            )
         """
-        acc_prob = np.zeros(number)
-        rosenbluth_wt = 1
-        for h2o_index in range(number):
-            h2o_coords, rosen = self._sample_insert_position(n_grid=20)
-            rosenbluth_wt *= rosen
-            h2o_atoms = Atoms('OHH', positions=h2o_coords)
+
+        
+        trial_positions, trial_energies = self.generate_trial_positions(100, exclusion_radius=exclusion_radius)
+        rosen_probs = np.exp(-(trial_energies - self.current_potential_en - self._free_H2O_en) / self.temperature / kb)
+        rosenbluth_sum = np.sum(rosen_probs)
+        rosen_probs /= rosenbluth_sum
+        selected_idx = self._sample_multidimensional_array(rosen_probs)
+        acc_prob = (rosenbluth_sum * self.volume / kb / self.temperature / self.nh2o
+                * (1e-10)**3 # Angstroms to meters
+                / 1.602e-19 # eV to J
+                * 101325 # J/m^3 to atm
+                * 8 * np.pi**2) # for rigid triatomic molecules
+        
+
+        if keep:
+            h2o_atoms = Atoms('OHH', positions=trial_positions[selected_idx])
             self._atoms += h2o_atoms
             self.nh2o += 1
-        """
-        en_after, forces_after = self._evaluate_potential()
-
-        # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013) * with modification for nonuniform probability
-        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
-        acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
-            * (1e-10)**3 # Angstroms to meters
-            / 1.602e-19 # eV to J
-            * 101325 # J/m^3 to atm
-            # * rosenbluth_wt
-        )
-        if keep:
+            en_after, forces_after = self._evaluate_potential()
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
         else:
@@ -595,21 +648,34 @@ class MOFWithAds:
         atom_idx = np.reshape((remove_idx * 3 + np.arange(3)[:, np.newaxis]).T, -1) + self.n_MOF_atoms
         original_atoms = self._atoms.copy()
         del self._atoms[atom_idx]
+        self.nh2o -= number
         en_after, forces_after = self._evaluate_potential()
+
+        trial_positions, trial_energies = self.generate_trial_positions(99)
+        rosen_probs = np.exp(-(trial_energies - en_after - self._free_H2O_en) / self.temperature / kb)
+        rosenbluth_sum = np.exp(-(self.current_potential_en - en_after - self._free_H2O_en) / self.temperature / kb) + np.sum(rosen_probs)
+        acc_prob = (1. / rosenbluth_sum / self.volume * kb * self.temperature * (self.nh2o + number)
+            / (1e-10)**3 # Angstroms to meters
+            * 1.602e-19 # eV to J
+            / 101325 # J/m^3 to atm
+            / (8 * np.pi**2)
+        )
 
         # rosenbluth_wt = self._backcalculate_insert_prob(original_atoms[atom_idx].get_positions(), n_grid=20)
         # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
         # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
-        acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * self.nh2o
-            / (1e-10)**3 # Angstroms to meters
-            * 1.602e-19 # eV to J
-            / 101325 # J/m^3 to atm
-            # / rosenbluth_wt
-        )
+        # acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * (self.nh2o + number)
+        #     / (1e-10)**3 # Angstroms to meters
+        #     * 1.602e-19 # eV to J
+        #     / 101325 # J/m^3 to atm
+        #     / (8 * np.pi**2)
+        # )
+
+
         if put_back:
             self._atoms = original_atoms
+            self.nh2o += number
         else:
-            self.nh2o -= number
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
         return acc_prob
