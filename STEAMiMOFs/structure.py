@@ -5,11 +5,10 @@ import ase.geometry
 from ase import Atoms
 import numpy as np
 import pickle
-import nequip.scripts.deploy
-from nequip.data.transforms import TypeMapper
-from nequip.data import AtomicData, AtomicDataDict
 from typing import Union
 import yaml
+import mace.data
+from mace.tools import torch_geometric, torch_tools, utils
 
 kb = 8.617333262e-5 # Boltzmann Constant, eV/K
 
@@ -36,12 +35,22 @@ class MOFWithAds:
         # self._mof_LJ_eps = np.array([LJ_energy[atom.symbol] for atom in self._atoms]) * 0.043 # eV
         # self._mof_LJ_sigma = np.array([LJ_distance[atom.symbol] for atom in self._atoms])
 
-        self._ngrid_O = ngrid_O
-        self._ngrid_H1 = ngrid_H1
-        self._ngrid_H2 = ngrid_H2
+        # self._ngrid_O = ngrid_O
+        # self._ngrid_H1 = ngrid_H1
+        # self._ngrid_H2 = ngrid_H2
+        self._MOF_exclusion_radius = 1.5
+        self._OO_exclusion_radius = 1.5
+        self._HH_exclusion_radius = 1.0
+        self._HO_exclusion_radius = 0.6
 
         if H2O_path is not None:
             H2O_atoms = ase.io.read(H2O_path, index=-1)
+            # check whether the trajectory file was saved with MOF atoms
+            has_MOF = True
+            for atom_idx in range(10):
+                has_MOF = has_MOF and (H2O_atoms[atom_idx].symbol == self._atoms[atom_idx].symbol)
+            if has_MOF:
+                H2O_atoms = H2O_atoms[self.n_MOF_atoms:]
             assert(len(H2O_atoms) % 3 == 0)
             self.nh2o = len(H2O_atoms) // 3
             self._atoms += H2O_atoms
@@ -58,39 +67,20 @@ class MOFWithAds:
             model_ranges = np.zeros([n_models, 2])
             for idx, path in enumerate(model_paths.keys()):
                 model_ranges[idx] = model_paths[path]
-               # Code adapted from nequip.ase.nequip_calculator
-                this_model, metadata = nequip.scripts.deploy.load_deployed_model(
-                                        model_path=path,
-                                        device=self._device,
-                                        set_global_options="warn",
-                                )
-                this_r_max = float(metadata[nequip.scripts.deploy.R_MAX_KEY])
-                r_max = this_r_max
-                # TO-DO: assert consistency in r_max across models
+                # Code adapted from mace.cli.eval_configs
+                this_model = torch.load(f=path, map_location=self._device)
+                this_model = this_model.to(
+                    self._device
+                )  # shouldn't be necessary but seems to help with CUDA problems
+                for param in this_model.parameters():
+                    param.requires_grad = False
+
                 tmp_models.append(this_model)
             
             # TO-DO: assert disjoint model ranges 
-            self._r_max = r_max
+            self._z_table = utils.AtomicNumberTable([int(z) for z in tmp_models[0].atomic_numbers])
             self._models = tmp_models
             self._model_ranges = model_ranges
-            
-            # build typemapper
-            species_to_type_name = {
-                        "H" : "H",
-                        "C" : "C",
-                        "O" : "O",
-                        "Zr" : "Zr",
-                        "Mg" : "Mg",
-                    }
-            type_names = metadata[nequip.scripts.deploy.TYPE_NAMES_KEY].split(" ")
-            type_name_to_index = {n: i for i, n in enumerate(type_names)}
-            chemical_symbol_to_type = {
-                sym: type_name_to_index[species_to_type_name[sym]]
-                for sym in ase.data.chemical_symbols
-                if sym in type_name_to_index
-            }
-            assert(len(chemical_symbol_to_type) == len(type_names))
-            self._transform = TypeMapper(chemical_symbol_to_type=chemical_symbol_to_type)
         
         if H2O_DFT_path is None:
             raise ValueError('H2O DFT path must be provided')
@@ -137,13 +127,24 @@ class MOFWithAds:
             assert(model_idx.shape[0] == 1)
             model_idx = model_idx[0]
 
-            data = AtomicData.from_ase(atoms=self._atoms, r_max=self._r_max)
-            data = self._transform(data)
+            this_model = self._models[model_idx]
+            config = mace.data.config_from_atoms(self._atoms)
+            data = mace.data.AtomicData.from_config(config, z_table=self._z_table, cutoff=float(this_model.r_max))
             data = data.to(self._device)
-            data = AtomicData.to_AtomicDataDict(data)
-            out = self._models[model_idx](data)
-            energy = out[AtomicDataDict.TOTAL_ENERGY_KEY][0, 0].detach().cpu().numpy()
-            forces = out[AtomicDataDict.FORCE_KEY][self.n_MOF_atoms:].detach().cpu().numpy()
+            data_loader = torch_geometric.dataloader.DataLoader(dataset=[data])
+            for batch in data_loader:
+                batch = batch.to(self._device)
+                out = this_model(batch.to_dict(), compute_stress=False)
+            forces = out["forces"][self.n_MOF_atoms:].detach().cpu().numpy()
+            energy = out["energy"][0].detach().cpu().numpy()
+
+            # data = AtomicData.from_ase(atoms=self._atoms, r_max=self._r_max)
+            # data = self._transform(data)
+            # data = data.to(self._device)
+            # data = AtomicData.to_AtomicDataDict(data)
+            # out = self._models[model_idx](data)
+            # energy = out[AtomicDataDict.TOTAL_ENERGY_KEY][0, 0].detach().cpu().numpy()
+            # forces = out[AtomicDataDict.FORCE_KEY][self.n_MOF_atoms:].detach().cpu().numpy()
         else:
             energy = 0.0
             forces = np.zeros([self.nh2o * 3, 3])
@@ -173,7 +174,7 @@ class MOFWithAds:
             hoh_bond_angle = np.arccos(np.dot(h2o_pos[2] - h2o_pos[0], h2o_pos[1] - h2o_pos[0]) / self._rOH**2)
             assert(np.allclose(hoh_bond_angle, self._aHOH))
     
-    def generate_trial_positions(self, number : int, exclusion_radius=1.0):
+    def generate_trial_positions(self, number : int):
 
         positions = np.zeros([number, 3])
         energies = np.zeros(number)
@@ -217,9 +218,20 @@ class MOFWithAds:
         h2o_coords[:, 2] = O_cart_coords + H2_vecs
         h2o_coords.shape = (number * 3, 3)
 
-        _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.get_positions(), cell=cell, pbc=self._atoms.pbc)
-        distances.shape = (number, 3, -1)
-        too_close = np.any(distances < exclusion_radius, axis=(1, 2))
+        all_pos = self._atoms.get_positions()
+        _, mof_distances = ase.geometry.get_distances(h2o_coords, all_pos[:self.n_MOF_atoms], cell=cell, pbc=self._atoms.pbc)
+        mof_distances.shape = (number, 3, self.n_MOF_atoms)
+        too_close = np.any(mof_distances < self._MOF_exclusion_radius, axis=(1, 2))
+        if self.nh2o > 0:
+            _, h2o_distances = ase.geometry.get_distances(h2o_coords, all_pos[self.n_MOF_atoms:], cell=cell, pbc=self._atoms.pbc)
+            h2o_distances.shape = (number, 3, self.nh2o * 3)
+            oo_distances = h2o_distances[:, 0, ::3]
+            oh_distances = h2o_distances[:, 1:, ::3]
+            hh_distances = np.append(h2o_distances[:, 1:, 1::3], h2o_distances[:, 1:, 2::3], axis=2)
+            too_close = np.logical_or(too_close, np.any(oo_distances < self._OO_exclusion_radius, axis=1))
+            too_close = np.logical_or(too_close, np.any(oh_distances < self._HO_exclusion_radius, axis=(1, 2)))
+            too_close = np.logical_or(too_close, np.any(hh_distances < self._HH_exclusion_radius, axis=(1, 2)))
+
         energies[too_close] = np.inf
         h2o_coords.shape = (number, 3, 3)
 
@@ -237,89 +249,22 @@ class MOFWithAds:
         return positions, energies
 
 
-    def insert_h2o(self, number : int=1, keep=True, exclusion_radius=1.0) -> float:
+    def insert_h2o(self, number : int=1, keep=True) -> float:
         """
         Insert H2O molecules with random position and orientation in the simulation cell
         Arguments:
             number: The number of H2O molecules (not atoms) to insert
             keep: Whether the inserted molecules should remain in the simulation cell upon return, or whether they should be deleted (as for the NVT+W method)
-            exclusion_radius: Insertions that place atoms within this distance of other atoms will be rejected and re-tried
         Returns:
             The NVT+W probability divided by the fugacity for the insertion.
         """
-
-        """
-        cell = self._atoms.get_cell()
-
-        O_frac_coords = self.rng.random((number, 3))
-        O_cart_coords = np.einsum('vc,nv->nc', cell, O_frac_coords)
-
-        # see https://math.stackexchange.com/questions/1585975/how-to-generate-random-points-on-a-sphere
-        OH_vectors = self.rng.standard_normal((number, 3))
-        is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-        while (np.any(is_zero)):
-            num_zero = np.sum(is_zero)
-            new_vecs = self.rng.standard_normal(num_zero, 3)
-            OH_vectors[is_zero] = new_vecs
-            is_zero = np.linalg.norm(OH_vectors, axis=1) < 1e-8
-        OH_vectors /= np.linalg.norm(OH_vectors, axis=1)[:, np.newaxis]
-
-        arbitrary_vec = OH_vectors[0].copy()
-        arbitrary_vec[0] += 0.1
-        arbitrary_vec /= np.linalg.norm(arbitrary_vec)
         
-        # Make sure arbitrary_vec not parallel or antiparallel to any OH_vectors
-        while(np.any(np.abs(np.abs(np.einsum('nc,c->n', OH_vectors, arbitrary_vec)) - 1) < 1e-8)):
-            arbitrary_vec[1] += 0.1
-            arbitrary_vec /= np.linalg.norm(arbitrary_vec)
-        x_vecs = np.cross(OH_vectors, arbitrary_vec)
-        x_vecs /= np.linalg.norm(x_vecs, axis=-1)[:, np.newaxis]
-        y_vecs = np.cross(OH_vectors, x_vecs)
-
-        H2_angles = self.rng.random(number) * np.pi * 2
-    
-        H2_vecs = (np.cos(H2_angles)[:, np.newaxis] * x_vecs + np.sin(H2_angles)[:, np.newaxis] * y_vecs) * np.sin(self._aHOH) + np.cos(self._aHOH) * OH_vectors
-        H2_vecs /= np.linalg.norm(H2_vecs, axis=1)[:, np.newaxis]
-        H2_vecs *= self._rOH
-
-        OH_vectors *= self._rOH
-
-        h2o_coords = np.zeros([number, 3, 3]) # O, H1, H2
-        h2o_coords[:, 0] = O_cart_coords
-        h2o_coords[:, 1] = O_cart_coords + OH_vectors
-        h2o_coords[:, 2] = O_cart_coords + H2_vecs
-        h2o_coords.shape = (number * 3, 3)
-
-        _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.get_positions(), cell=cell, pbc=self._atoms.pbc)
-
-        h2o_atoms = Atoms('OHH' * number, positions=h2o_coords)
-        self._atoms += h2o_atoms
-        self.nh2o += number
-        
-        if np.any(distances < exclusion_radius):
-            acc_prob = 0
-            if keep:
-                en_after, forces_after = self._evaluate_potential()
-        else:
-            en_after, forces_after = self._evaluate_potential()
-
-            # Eq 71 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013) * with modification for nonuniform probability
-            # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Multiply by fugacity in atm to get acceptance probability.
-            acc_prob = (np.exp(-(en_after - self.current_potential_en - self._free_H2O_en * number) / self.temperature / kb) * self.volume / kb / self.temperature / self.nh2o
-                * (1e-10)**3 # Angstroms to meters
-                / 1.602e-19 # eV to J
-                * 101325 # J/m^3 to atm
-                * 8 * np.pi**2 # for rigid triatomic molecules
-            )
-        """
-
-        
-        trial_positions, trial_energies = self.generate_trial_positions(100, exclusion_radius=exclusion_radius)
+        trial_positions, trial_energies = self.generate_trial_positions(100)
         rosen_probs = np.exp(-(trial_energies - self.current_potential_en - self._free_H2O_en) / self.temperature / kb)
         rosenbluth_sum = np.sum(rosen_probs)
         rosen_probs /= rosenbluth_sum
         selected_idx = self._sample_multidimensional_array(rosen_probs)
-        acc_prob = (rosenbluth_sum * self.volume / kb / self.temperature / self.nh2o
+        acc_prob = (rosenbluth_sum * self.volume / kb / self.temperature / (self.nh2o + number)
                 * (1e-10)**3 # Angstroms to meters
                 / 1.602e-19 # eV to J
                 * 101325 # J/m^3 to atm
@@ -329,16 +274,13 @@ class MOFWithAds:
         if keep:
             h2o_atoms = Atoms('OHH', positions=trial_positions[selected_idx])
             self._atoms += h2o_atoms
-            self.nh2o += 1
+            self.nh2o += number
             en_after, forces_after = self._evaluate_potential()
             self.current_potential_en = en_after
             self._H2O_forces = forces_after
-        else:
-            del self._atoms[(-3 * number):]
-            self.nh2o -= number
         return acc_prob
     
-    def insert_h2o_lowen(self, number : int=1, n_sample=500, exclusion_radius=1.0):
+    def insert_h2o_lowen(self, number : int=1, n_sample=500):
         for ins_idx in range(number):
             cell = self._atoms.get_cell()
 
@@ -380,10 +322,20 @@ class MOFWithAds:
             h2o_coords[:, 2] = O_cart_coords + H2_vecs
 
             h2o_coords.shape = (n_sample * 3, 3)
-            _, distances = ase.geometry.get_distances(h2o_coords, self._atoms.arrays['positions'], cell=cell, pbc=self._atoms.pbc)
+            all_pos = self._atoms.get_positions()
+            _, mof_distances = ase.geometry.get_distances(h2o_coords, all_pos[:self.n_MOF_atoms], cell=cell, pbc=self._atoms.pbc)
+            mof_distances.shape = (n_sample, 3, self.n_MOF_atoms)
+            keep = np.all(mof_distances > self._MOF_exclusion_radius, axis=(1, 2))
+            if self.nh2o > 0:
+                _, h2o_distances = ase.geometry.get_distances(h2o_coords, all_pos[self.n_MOF_atoms:], cell=cell, pbc=self._atoms.pbc)
+                h2o_distances.shape = (n_sample, 3, self.nh2o * 3)
+                oo_distances = h2o_distances[:, 0, ::3]
+                oh_distances = h2o_distances[:, 1:, ::3]
+                hh_distances = np.append(h2o_distances[:, 1:, 1::3], h2o_distances[:, 1:, 2::3], axis=2)
+                keep = np.logical_and(keep, np.all(oo_distances > self._OO_exclusion_radius, axis=1))
+                keep = np.logical_and(keep, np.all(oh_distances > self._HO_exclusion_radius, axis=(1, 2)))
+                keep = np.logical_and(keep, np.all(hh_distances > self._HH_exclusion_radius, axis=(1, 2)))
             h2o_coords.shape = (n_sample, 3, 3)
-            distances.shape = (n_sample, 3, self.n_MOF_atoms)
-            keep = np.all(distances > exclusion_radius, axis=(1, 2))
             h2o_coords = h2o_coords[keep]
             n_keep = h2o_coords.shape[0]
 
@@ -654,24 +606,14 @@ class MOFWithAds:
         trial_positions, trial_energies = self.generate_trial_positions(99)
         rosen_probs = np.exp(-(trial_energies - en_after - self._free_H2O_en) / self.temperature / kb)
         rosenbluth_sum = np.exp(-(self.current_potential_en - en_after - self._free_H2O_en) / self.temperature / kb) + np.sum(rosen_probs)
+        # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
+        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
         acc_prob = (1. / rosenbluth_sum / self.volume * kb * self.temperature * (self.nh2o + number)
             / (1e-10)**3 # Angstroms to meters
             * 1.602e-19 # eV to J
             / 101325 # J/m^3 to atm
             / (8 * np.pi**2)
         )
-
-        # rosenbluth_wt = self._backcalculate_insert_prob(original_atoms[atom_idx].get_positions(), n_grid=20)
-        # Eq 72 in Dubbeldam et al., Molecular Simulation 39, 1253-1292 (2013)
-        # Fugacity is not included to allow to calculate multiple isotherm points in one simulation. Divide by fugacity in atm to get acceptance probability.
-        # acc_prob = (np.exp(-(en_after - self.current_potential_en + self._free_H2O_en * number) / self.temperature / kb) / self.volume * kb * self.temperature * (self.nh2o + number)
-        #     / (1e-10)**3 # Angstroms to meters
-        #     * 1.602e-19 # eV to J
-        #     / 101325 # J/m^3 to atm
-        #     / (8 * np.pi**2)
-        # )
-
-
         if put_back:
             self._atoms = original_atoms
             self.nh2o += number
@@ -735,6 +677,22 @@ class MOFWithAds:
 
         new_h2o_rel = new_h2o_rel @ rot_matrix_rand.T
         new_h2o_pos = orig_com + new_h2o_rel
+
+        all_pos = self._atoms.get_positions()
+        _, mof_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[:self.n_MOF_atoms], cell=self._atoms.get_cell(), pbc=self._atoms.pbc)
+        mof_distances.shape = (3, self.n_MOF_atoms)
+        _, h2o_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[self.n_MOF_atoms:], cell=self._atoms.get_cell(), pbc=self._atoms.pbc)
+        h2o_distances.shape = (3, self.nh2o * 3)
+        h2o_distances[:, (3 * index):(3 * index + 3)] = 100000
+        oo_distances = h2o_distances[0, ::3]
+        oh_distances = h2o_distances[1:, ::3]
+        hh_distances = np.append(h2o_distances[1:, 1::3], h2o_distances[1:, 2::3])
+        too_close = (np.any(mof_distances < self._MOF_exclusion_radius) 
+                     or np.any(oo_distances < self._OO_exclusion_radius)
+                     or np.any(oh_distances < self._HO_exclusion_radius)
+                     or np.any(hh_distances < self._HH_exclusion_radius))
+        if too_close:
+            return False
 
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
@@ -806,6 +764,22 @@ class MOFWithAds:
         new_scaled[:, new_scaled[0] < 0.] += 1
         new_h2o_pos = self._atoms.cell.cartesian_positions(new_scaled)
 
+        all_pos = self._atoms.get_positions()
+        _, mof_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[:self.n_MOF_atoms])
+        mof_distances.shape = (3, self.n_MOF_atoms)
+        _, h2o_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[self.n_MOF_atoms:])
+        h2o_distances.shape = (3, self.nh2o * 3)
+        h2o_distances[:, (3 * index):(3 * index + 3)] = 100000
+        oo_distances = h2o_distances[0, ::3]
+        oh_distances = h2o_distances[1:, ::3]
+        hh_distances = np.append(h2o_distances[1:, 1::3], h2o_distances[1:, 2::3])
+        too_close = (np.any(mof_distances < self._MOF_exclusion_radius) 
+                     or np.any(oo_distances < self._OO_exclusion_radius)
+                     or np.any(oh_distances < self._HO_exclusion_radius)
+                     or np.any(hh_distances < self._HH_exclusion_radius))
+        if too_close:
+            return False
+
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]
 
@@ -862,6 +836,22 @@ class MOFWithAds:
             orig_com_force = np.sum(self._H2O_forces[(3 * index):(3 * index + 3)], axis=0) # Force on center of mass
             internal_force = self._H2O_forces[(3 * index):(3 * index + 3)] - orig_com_force
             new_h2o_pos += self.vib_step**2 / 2 / kb / self.temperature * internal_force
+
+        all_pos = self._atoms.get_positions()
+        _, mof_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[:self.n_MOF_atoms], cell=self._atoms.get_cell(), pbc=self._atoms.pbc)
+        mof_distances.shape = (3, self.n_MOF_atoms)
+        _, h2o_distances = ase.geometry.get_distances(new_h2o_pos, all_pos[self.n_MOF_atoms:], cell=self._atoms.get_cell(), pbc=self._atoms.pbc)
+        h2o_distances.shape = (3, self.nh2o * 3)
+        h2o_distances[:, (3 * index):(3 * index + 3)] = 100000
+        oo_distances = h2o_distances[0, ::3]
+        oh_distances = h2o_distances[1:, ::3]
+        hh_distances = np.append(h2o_distances[1:, 1::3], h2o_distances[1:, 2::3])
+        too_close = (np.any(mof_distances < self._MOF_exclusion_radius) 
+                     or np.any(oo_distances < self._OO_exclusion_radius)
+                     or np.any(oh_distances < self._HO_exclusion_radius)
+                     or np.any(hh_distances < self._HH_exclusion_radius))
+        if too_close:
+            return False
         
         for atom_idx in range(3):
             self._atoms[self.n_MOF_atoms + 3 * index + atom_idx].position = new_h2o_pos[atom_idx]

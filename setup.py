@@ -22,12 +22,12 @@ setup(
         # make the scripts available as command line scripts
         "console_scripts": [
             "STEAMiMOFs-nvtw = STEAMiMOFs.scripts.nvtw:main",
-            "STEAMiMOFs-enthalpy = STEAMiMOFs.scripts.enthalpy:main"
+            "STEAMiMOFs-enthalpy = STEAMiMOFs.scripts.enthalpy:main",
+            "STEAMiMOFs-isotherm = STEAMiMOFs.scripts.isotherm:main"
         ]
     },
     install_requires=[
         "argparse",
-        "mir-allegro",
         "emcee"
     ]
 )

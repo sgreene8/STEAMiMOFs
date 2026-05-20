@@ -216,7 +216,7 @@ def main():
             nvtw_ins_file.flush()
         if nvtw_rem_prob > 0:
             nvtw_rem_file.flush()
-        mof_ads.write_to_traj()
+        mof_ads.write_to_traj(with_MOF=True)
         mof_ads.save_rng_state('rng_state.dat')
 
         if num_trans_attempted != 0:
