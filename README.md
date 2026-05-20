@@ -1,11 +1,11 @@
 # STEAMiMOFs: Simulation Tools for Energies of Adsorption of Molecules in Metal-Organic Frameworks
-This python-based package can be used to predict the adsorption properties of metal-organic frameworks or other nanoporous materials. It implements Monte Carlo simulations for calculating adsorption isoterms and enthalpies of adsorption using machine-learned interatomic potentials based on the [Allegro framework](https://www.nature.com/articles/s41467-023-36329-y).
+This python-based package can be used to predict the adsorption properties of metal-organic frameworks or other nanoporous materials. It implements Monte Carlo simulations for calculating adsorption isoterms and enthalpies of adsorption using machine-learned interatomic potentials based on the [MACE framework](https://arxiv.org/abs/2206.07697).
 
 ## Installation
 
-`STEAMiMOFs` requires the `allegro` package and its dependencies, which can be installed by following the instructions at https://github.com/mir-group/allegro/.
+`STEAMiMOFs` requires the `mace-torch` package and its dependencies, which can be installed by following the instructions at https://mace-docs.readthedocs.io/en/latest/guide/installation.html#installations.
 
-Once `allegro` is installed, `STEAMiMOFs` can be installed by first downloading the source code:
+Once `mace-torch` is installed, `STEAMiMOFs` can be installed by first downloading the source code:
 ```bash
 git clone --depth 1 https://github.com/sgreene8/STEAMiMOFs/
 ```
